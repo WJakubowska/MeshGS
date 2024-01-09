@@ -133,99 +133,7 @@ def config_parser():
     return parser
 
 
-# center_point = (400, 400, 0)
-# radius = [285, 140]
-# n_subdivisions = 2
-# icosphere = Icosphere(n_subdivisions, center_point, radius)
-# vertices, triangles = icosphere.vertices, icosphere.triangles
-# # plot_sphere(vertices, triangles)
-# unique_triangles = get_unique_triangles(triangles)
-# # plot_filled_triangle_sphere(vertices, triangles, fill_triangle_index=5, show_vertices=False)
-# # print(len(unique_triangles))
 
-# uv = icosphere.get_unique_vertices()
-# # print("len get_unique_vertices():", len(uv))
-
-# unique_vertices = icosphere.get_all_vertices()
-# # print("len get_all_vertices(): ", len(unique_vertices))
-
-# result_triangles = get_triangles_as_indices(unique_vertices, triangles)
-
-# xyz, features_dc, features_rest, opacity, vertices_tensor = setup_training_input(unique_vertices, result_triangles)
-
-# xyz_tensor = xyz.float().long()
-# torch.save(xyz_tensor, 'faces.pt')
-# torch.save(vertices_tensor, 'vertices.pt')
-# loaded_ver = torch.load('vertices.pt')
-# loaded_fa = torch.load('faces.pt')
-
-# ver = loaded_ver.tolist()
-# tri = loaded_fa.tolist()
-
-# # plot_sphere_from_tensor_with_index(ver, tri)
-# # find_intersection_points_with_mesh()
-
-# transform_matrix = [[
-#                     -1.0,
-#                     0.0,
-#                     0.0,
-#                     0.0
-#                 ],
-#                 [
-#                     0.0,
-#                     -0.41173306107521057,
-#                     0.9113044738769531,
-#                     3.673585891723633
-#                 ],
-#                 [
-#                     0.0,
-#                     0.9113044142723083,
-#                     0.41173309087753296,
-#                     1.659749150276184
-#                 ],
-#                 [
-#                     0.0,
-#                     0.0,
-#                     0.0,
-#                     1.0
-#                 ]]
-
-# image_path = 'C:/Users/48783/Desktop/GS+NeRF+Mesh/MeshGS/r_0.png'
-# image = cv2.imread(image_path)
-# H, W, _ = image.shape
-# camera_angle_x = 0.6911112070083618
-# focal = .5 * W / np.tan(.5 * camera_angle_x)
-# # c2w = np.array(transform_matrix)[:3, :4]
-# c2w = np.array(transform_matrix)
-# K = np.array([
-#             [focal, 0, 0.5*W],
-#             [0, focal, 0.5*H],
-#             [0, 0, 1]
-#         ])
-
-# c2w = torch.tensor(c2w)
-# rays_o, rays_d = get_rays(H, W, K, c2w)
-# rays_o = rays_o.reshape((-1, 3))
-# rays_d = rays_d.reshape((-1, 3))
-# selected_indices = np.random.choice(len(rays_o), 500, replace=False)
-# rays_o = rays_o[selected_indices]
-# rays_d = rays_d[selected_indices]
-
-# print(rays_o.shape)
-# torch.save(rays_o, 'rays_origins.pt')
-# torch.save(rays_d, 'rays_directions.pt')
-# loaded_o = torch.load('rays_origins.pt')
-# # print(loaded_o)
-# out = find_intersection_points_with_mesh(False)
-# points=out['pts'][out['valid_point']]
-# plot_rays_mesh_and_points(
-#     rays_o,
-#     rays_d,
-#     loaded_ver,
-#     loaded_fa,
-#     points,
-#     500.0,
-# )
 #################################################################################################################################
 ################################### Traing with NeRF ############################################################################
 #################################################################################################################################
@@ -241,6 +149,9 @@ def batchify(fn, chunk):
     if chunk is None:
         return fn
     def ret(inputs):
+        # print("chunk ", type(chunk))
+        # print("inputs", inputs.dtype)
+        inputs = inputs.to(torch.float32)
         return torch.cat([fn(inputs[i:i+chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
     return ret
 
@@ -470,7 +381,7 @@ def create_nerf(args):
     return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer
 
 
-def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
+def raw2outputs(raw, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
     """Transforms model's predictions to semantically meaningful values.
     Args:
         raw: [num_rays, num_samples along ray, 4]. Prediction from model.
@@ -485,11 +396,11 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
     """
     raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
 
-    dists = z_vals[...,1:] - z_vals[...,:-1]
-    dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
+    # dists = z_vals[...,1:] - z_vals[...,:-1]
+    # dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
 
-    dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
-
+    # dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
+    dists = torch.ones_like(raw[..., :1])
     rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
     noise = 0.
     if raw_noise_std > 0.:
@@ -503,10 +414,12 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
 
     alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
+    alpha = alpha.squeeze(-1)
+    
     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
     rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
 
-    depth_map = torch.sum(weights * z_vals, -1)
+    depth_map = torch.sum(weights, -1) 
     disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
     acc_map = torch.sum(weights, -1)
 
@@ -562,56 +475,90 @@ def render_rays(ray_batch,
     N_rays = ray_batch.shape[0]
     rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each
     viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 8 else None
-    bounds = torch.reshape(ray_batch[...,6:8], [-1,1,2])
-    near, far = bounds[...,0], bounds[...,1] # [-1,1]
+    # bounds = torch.reshape(ray_batch[...,6:8], [-1,1,2])
+    # near, far = bounds[...,0], bounds[...,1] # [-1,1]
 
-    t_vals = torch.linspace(0., 1., steps=N_samples)
-    if not lindisp:
-        z_vals = near * (1.-t_vals) + far * (t_vals)
-    else:
-        z_vals = 1./(1./near * (1.-t_vals) + 1./far * (t_vals))
+    # t_vals = torch.linspace(0., 1., steps=N_samples)
+    # if not lindisp:
+    #     z_vals = near * (1.-t_vals) + far * (t_vals)
+    # else:
+    #     z_vals = 1./(1./near * (1.-t_vals) + 1./far * (t_vals))
 
-    z_vals = z_vals.expand([N_rays, N_samples])
+    # z_vals = z_vals.expand([N_rays, N_samples])
 
-    if perturb > 0.:
-        # get intervals between samples
-        mids = .5 * (z_vals[...,1:] + z_vals[...,:-1])
-        upper = torch.cat([mids, z_vals[...,-1:]], -1)
-        lower = torch.cat([z_vals[...,:1], mids], -1)
-        # stratified samples in those intervals
-        t_rand = torch.rand(z_vals.shape)
+    # if perturb > 0.:
+    #     # get intervals between samples
+    #     mids = .5 * (z_vals[...,1:] + z_vals[...,:-1])
+    #     upper = torch.cat([mids, z_vals[...,-1:]], -1)
+    #     lower = torch.cat([z_vals[...,:1], mids], -1)
+    #     # stratified samples in those intervals
+    #     t_rand = torch.rand(z_vals.shape)
 
-        # Pytest, overwrite u with numpy's fixed random numbers
-        if pytest:
-            np.random.seed(0)
-            t_rand = np.random.rand(*list(z_vals.shape))
-            t_rand = torch.Tensor(t_rand)
+    #     # Pytest, overwrite u with numpy's fixed random numbers
+    #     if pytest:
+    #         np.random.seed(0)
+    #         t_rand = np.random.rand(*list(z_vals.shape))
+    #         t_rand = torch.Tensor(t_rand)
 
-        z_vals = lower + (upper - lower) * t_rand
+    #     z_vals = lower + (upper - lower) * t_rand
+    torch.save(rays_o, 'rays_origins.pt')
+    torch.save(rays_d, 'rays_directions.pt')
+    out = find_intersection_points_with_mesh(False)
+    # loaded_ver = torch.load('vertices.pt')
+    # loaded_fa = torch.load('faces.pt')
+    points=out['pts'][out['valid_point']]
+    # plot_rays_mesh_and_points(
+    #     rays_o,
+    #     rays_d,
+    #     loaded_ver,
+    #     loaded_fa,
+    #     points,
+    #     500.0,
+    # )
+    # pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
 
-    pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
+    # print("pts", points)
+    # print(points.shape)
+    pts = torch.zeros((1024, 1, 3))
 
+
+    num_points = min(points.shape[0], 1024)
+    pts[:num_points, 0, :] = points[:num_points, :]
 
 #     raw = run_network(pts)
     raw = network_query_fn(pts, viewdirs, network_fn)
-    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
     if N_importance > 0:
 
         rgb_map_0, disp_map_0, acc_map_0 = rgb_map, disp_map, acc_map
 
-        z_vals_mid = .5 * (z_vals[...,1:] + z_vals[...,:-1])
-        z_samples = sample_pdf(z_vals_mid, weights[...,1:-1], N_importance, det=(perturb==0.), pytest=pytest)
-        z_samples = z_samples.detach()
+        # z_vals_mid = .5 * (z_vals[...,1:] + z_vals[...,:-1])
+        # z_samples = sample_pdf(z_vals_mid, weights[...,1:-1], N_importance, det=(perturb==0.), pytest=pytest)
+        # z_samples = z_samples.detach()
 
-        z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
-        pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + N_importance, 3]
+        # z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
+        # pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + N_importance, 3]
+
+        torch.save(rays_o, 'rays_origins.pt')
+        torch.save(rays_d, 'rays_directions.pt')
+        out = find_intersection_points_with_mesh(False)
+        points=out['pts'][out['valid_point']]
+        
+        # print("pts", points)
+        # print(points.shape)
+        pts = torch.zeros((1024, 1, 3))
+
+
+        num_points = min(points.shape[0], 1024)
+        pts[:num_points, 0, :] = points[:num_points, :]
+
 
         run_fn = network_fn if network_fine is None else network_fine
         # raw = run_network(pts, fn=run_fn)
         raw = network_query_fn(pts, viewdirs, run_fn)
 
-        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
     ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map}
     if retraw:
@@ -620,7 +567,7 @@ def render_rays(ray_batch,
         ret['rgb0'] = rgb_map_0
         ret['disp0'] = disp_map_0
         ret['acc0'] = acc_map_0
-        ret['z_std'] = torch.std(z_samples, dim=-1, unbiased=False)  # [N_rays]
+        # ret['z_std'] = torch.std(z_samples, dim=-1, unbiased=False)  # [N_rays]
 
     for k in ret:
         if (torch.isnan(ret[k]).any() or torch.isinf(ret[k]).any()) and DEBUG:
@@ -632,6 +579,21 @@ def train():
 
     parser = config_parser()
     args = parser.parse_args()
+
+    center_point = (400, 400, 0)
+    radius = [285, 140]
+    n_subdivisions = 2
+    icosphere = Icosphere(n_subdivisions, center_point, radius)
+    vertices, triangles = icosphere.vertices, icosphere.triangles
+    unique_triangles = get_unique_triangles(triangles)
+    unique_vertices = icosphere.get_all_vertices()
+    result_triangles = get_triangles_as_indices(unique_vertices, triangles)
+    xyz, features_dc, features_rest, opacity, vertices_tensor = setup_training_input(unique_vertices, result_triangles)
+
+    xyz_tensor = xyz.float().long()
+    torch.save(xyz_tensor, 'faces.pt')
+    torch.save(vertices_tensor, 'vertices.pt')
+
 
     # Load data
     K = None
