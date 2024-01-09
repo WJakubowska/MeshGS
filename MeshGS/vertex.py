@@ -3,7 +3,7 @@ class Vertex:
         self.x = x
         self.y = y
         self.z = z
-        self.coordinates = (x, y, z)
+        # self.coordinates = (self.x, self.y, self.z)
         self.index = index
 
     def __str__(self):
@@ -14,10 +14,10 @@ class Vertex:
         return {'x': self.x, 'y': self.y, 'z': self.z}
 
     def __lt__(self, other):
-        return self.coordinates < other.coordinates
+        return (self.x, self.y, self.z) < (other.x, other.y, other.z)
 
     def __eq__(self, other):
-        return isinstance(other, Vertex) and self.coordinates == other.coordinates
+        return isinstance(other, Vertex) and (self.x, self.y, self.z) == (other.x, other.y, other.z)
 
     def __hash__(self):
-        return hash(self.coordinates)
+        return hash((self.x, self.y, self.z))

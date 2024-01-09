@@ -6,11 +6,20 @@ class Icosphere:
     def __init__(self, n_subdivisions, center_point=(0, 0, 0), radius=[1]):
         self.vertices, self.triangles = self._create_icosphere(center_point, radius, n_subdivisions)
 
+    # def _project_to_unit_sphere(self, vertices):
+    #     for i in range(len(vertices)):
+    #         p = np.array([vertices[i].x, vertices[i].y, vertices[i].z])
+    #         n = np.linalg.norm(p)
+    #         vertices[i] = Vertex(p[0] / n, p[1] / n, p[2] / n)
+
     def _project_to_unit_sphere(self, vertices):
-        for i in range(len(vertices)):
-            p = np.array([vertices[i].x, vertices[i].y, vertices[i].z])
+        updated_vertices = []
+        for vertex in vertices:
+            p = np.array([vertex.x, vertex.y, vertex.z])
             n = np.linalg.norm(p)
-            vertices[i] = Vertex(p[0] / n, p[1] / n, p[2] / n)
+            updated_vertex = Vertex(p[0] / n, p[1] / n, p[2] / n)
+            updated_vertices.append(updated_vertex)
+        return updated_vertices
 
     def _icosahedron(self, center_point, radius):
         vertices = []
@@ -42,7 +51,7 @@ class Icosphere:
 
         vertices.extend(vertex_tab)
 
-        self._project_to_unit_sphere(vertices)
+        vertices = self._project_to_unit_sphere(vertices)
 
         triangles.extend([Triangle(v3, v2, v1), Triangle(v2, v3, v4),
                           Triangle(v6, v5, v4), Triangle(v5, v9, v4),
@@ -89,7 +98,7 @@ class Icosphere:
             vertices, triangles = self._icosahedron(center_point, radius)
             for _ in range(n_subdivisions):
                 vertices, triangles = self._loop_subdivision(vertices, triangles)
-                self._project_to_unit_sphere(vertices)
+                vertices = self._project_to_unit_sphere(vertices.copy())
             triangles_tab.append(triangles)
             vertices_tab.append(vertices)
 
@@ -98,4 +107,20 @@ class Icosphere:
         triangles_tab = [triangle for triangles in triangles_tab for triangle in triangles]
 
         return vertices_tab, triangles_tab
+
+    def count_unique_vertices(self):
+        unique_vertices_set = set(self.vertices)
+        count_unique = len(unique_vertices_set)
+        return count_unique
+
+    def get_unique_vertices(self):
+        unique_vertices_set = set(self.vertices)
+        return list(unique_vertices_set)
+
+    def get_all_vertices(self):
+        all_vertices_set = set()
+        for triangle in self.triangles:
+            all_vertices_set.update(triangle.get_vertices())
+        return list(all_vertices_set)
+
 

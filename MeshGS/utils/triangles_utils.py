@@ -30,3 +30,16 @@ def get_unique_triangles(triangles):
         if is_unique:
             unique_triangles.append(triangle)
     return unique_triangles
+
+def get_triangles_as_indices(unique_vertices, triangles):
+  for i, vertex in enumerate(unique_vertices):
+    vertex.index = i
+
+  # Utworzenie trójkątów z referencjami do tych samych obiektów wierzchołków
+  triangles_with_shared_vertices = [Triangle(
+      unique_vertices[unique_vertices.index(triangle.v0)],
+      unique_vertices[unique_vertices.index(triangle.v1)],
+      unique_vertices[unique_vertices.index(triangle.v2)])
+      for triangle in triangles]
+  # Zwrócenie listy indeksów
+  return [[vertex.index for vertex in triangle.get_vertices()] for triangle in triangles_with_shared_vertices]

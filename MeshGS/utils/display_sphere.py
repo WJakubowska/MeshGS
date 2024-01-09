@@ -1,6 +1,7 @@
 import plotly.graph_objects as go
 import plotly.io as pio
 from pathlib import Path
+import torchc
 
 pio.renderers.default = "browser"
 
@@ -47,3 +48,89 @@ def plot_filled_triangle_sphere(vertices, triangles, fill_triangle_index=None, s
 
     fig.update_layout(scene=dict(aspectmode="data"))
     save_plot_as_html('mesh_with_filled_face.html', fig)
+
+
+def plot_sphere_from_tensor_with_index(vertices, triangles, show_vertices=False):
+    fig = go.Figure()
+
+    for triangle in triangles:
+        v0, v1, v2 = triangle  # Extract vertex indices
+        x = [vertices[v0][0], vertices[v1][0], vertices[v2][0], vertices[v0][0]]
+        y = [vertices[v0][1], vertices[v1][1], vertices[v2][1], vertices[v0][1]]
+        z = [vertices[v0][2], vertices[v1][2], vertices[v2][2], vertices[v0][2]]
+
+        fig.add_trace(go.Scatter3d(x=x, y=y, z=z, mode='lines', line=dict(color='blue')))
+        if show_vertices:
+            fig.add_trace(go.Scatter3d(x=x, y=y, z=z, mode='markers', marker=dict(size=5, color='red')))
+
+    fig.update_layout(scene=dict(aspectmode="data"))
+    save_plot_as_html('mesh_from_tensor_with_index.html', fig)
+
+
+def plot_rays_mesh_and_points(
+    rays_origins: torch.Tensor,
+    rays_directions: torch.Tensor,
+    vertices: torch.Tensor,
+    faces: torch.Tensor,
+    points: torch.Tensor,
+    ray_length_scale: float = 1.0,
+):
+    vertices = vertices.detach().cpu().numpy()
+
+    # Create a layout for the 3D scene
+    layout = go.Layout(
+        scene=dict(
+            xaxis=dict(title='X'),
+            yaxis=dict(title='Y'),
+            zaxis=dict(title='Z'),
+        )
+    )
+    data = []
+
+    pts_on_mesh_sc = [go.Scatter3d(
+        x=points[:, 0].detach().cpu().numpy(),
+        y=points[:, 1].detach().cpu().numpy(),
+        z=points[:, 2].detach().cpu().numpy(),
+        mode='markers',
+        marker=dict(size=5, color='red'),
+        name='pts_on_mesh',
+    )]
+
+    lines = []
+    for i in range(len(rays_origins)):
+        ray_origin, ray_direction = rays_origins[i], rays_directions[i]
+        ray_end = ray_origin + ray_length_scale * ray_direction  # Dostosowanie długości promienia
+        lines.append(go.Scatter3d(
+            x=[ray_origin[0], ray_end[0]],
+            y=[ray_origin[1], ray_end[1]],
+            z=[ray_origin[2], ray_end[2]],
+            mode='lines',
+            line=dict(width=3, color='blue'),
+            name=f'Ray_{i}'
+        ))
+
+    data = data + lines
+
+    triangles = []
+    for face in faces:
+        f = list(face)
+        triangles.append(
+            go.Scatter3d(
+                x=vertices[:, 0][f + [f[0]]],
+                y=vertices[:, 1][f + [f[0]]],
+                z=vertices[:, 2][f + [f[0]]],
+                mode='lines',
+                marker=dict(size=5, color='black'),
+                showlegend=False
+            )
+        )
+
+    data = data + triangles + pts_on_mesh_sc
+
+    fig = go.Figure(
+        data=data,
+        layout=layout
+    )
+
+    save_plot_as_html('mesh_with_ray.html', fig)
+
