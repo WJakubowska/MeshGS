@@ -11,6 +11,13 @@ import numpy as np
 
 from load_blender import load_blender_data
 from run_nerf_helpers import *
+import os, sys
+from tqdm import tqdm, trange
+import imageio
+import json
+import random
+import time
+import torch.nn.functional as F
 
 
 def config_parser():
@@ -601,7 +608,7 @@ def render_rays(ray_batch,
         pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + N_importance, 3]
 
         run_fn = network_fn if network_fine is None else network_fine
-         raw = run_network(pts, fn=run_fn)
+        # raw = run_network(pts, fn=run_fn)
         raw = network_query_fn(pts, viewdirs, run_fn)
 
         rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
@@ -912,6 +919,6 @@ def train():
 
 
 if __name__=='__main__':
-    torch.set_default_tensor_type('torch.cuda.FloatTensor')
+    torch.set_default_tensor_type('torch.FloatTensor')
 
     train()

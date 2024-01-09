@@ -1,7 +1,7 @@
 import plotly.graph_objects as go
 import plotly.io as pio
 from pathlib import Path
-import torchc
+import torch
 
 pio.renderers.default = "browser"
 
