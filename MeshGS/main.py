@@ -123,7 +123,7 @@ def config_parser():
                         help='frequency of weight ckpt saving')
     parser.add_argument("--i_testset", type=int, default=50000, 
                         help='frequency of testset saving')
-    parser.add_argument("--i_video",   type=int, default=10, 
+    parser.add_argument("--i_video",   type=int, default=4000, 
                         help='frequency of render_poses video saving')
 
     return parser
@@ -147,7 +147,7 @@ def batchify(fn, chunk):
     def ret(inputs):
         # print("chunk ", type(chunk))
         # print("inputs", inputs.dtype)
-        print("Inputs batchify: ", inputs.shape)
+        # print("Inputs batchify: ", inputs.shape)
         inputs = inputs.to(torch.float32)
         return torch.cat([fn(inputs[i:i+chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
     return ret
@@ -650,7 +650,7 @@ def train():
         rays_rgb = torch.Tensor(rays_rgb).to(device)
 
 
-    N_iters = 200 + 1
+    N_iters = 20000 + 1
     print('Begin')
     print('TRAIN views are', i_train)
     print('TEST views are', i_test)
@@ -816,6 +816,6 @@ def train():
 
 
 if __name__=='__main__':
-    torch.set_default_tensor_type('torch.FloatTensor')
+    torch.set_default_tensor_type('torch.cuda.FloatTensor')
 
     train()
