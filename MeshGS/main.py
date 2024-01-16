@@ -156,7 +156,7 @@ def batchify(fn, chunk):
 def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
     """Prepares inputs and applies network 'fn'.
     """
-    print("Inputs run_network: ", inputs.shape)
+    # print("Inputs run_network: ", inputs.shape)
     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
     embedded = embed_fn(inputs_flat)
 
@@ -463,6 +463,8 @@ def render_rays(ray_batch,
     # pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
     N_rays = ray_batch.shape[0]
     rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each
+    print("rayd", rays_d.shape[0])
+    
     viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 8 else None
     
     loaded_ver = torch.load('vertices.pt')
@@ -487,7 +489,7 @@ def render_rays(ray_batch,
     sorted_matrix = torch.stack([torch.tensor(sorted(row.tolist(), key=lambda x: x[0] == 0)) for row in matrix])
 
     # Przypisanie punktów przecięcia sfery z promieniami 
-    output_matrix = torch.zeros((1024, num_nonzero_points, 3), dtype=torch.float64)
+    output_matrix = torch.zeros((rays_d.shape[0], num_nonzero_points, 3), dtype=torch.float64)
     output_matrix[:, :num_nonzero_points, :] = sorted_matrix[:, :num_nonzero_points, :]
     # plot_selected_points_on_sphere(output_matrix, loaded_ver, loaded_fa)
     pts = output_matrix
