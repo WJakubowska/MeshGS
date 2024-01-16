@@ -1,5 +1,5 @@
 from icosphere import Icosphere
-from utils.display_sphere import plot_sphere, plot_filled_triangle_sphere, plot_sphere_from_tensor_with_index, plot_rays_mesh_and_points
+from utils.display_sphere import plot_sphere, plot_filled_triangle_sphere, plot_sphere_from_tensor_with_index, plot_rays_mesh_and_points, plot_selected_points_on_sphere
 from utils.triangles_utils import get_unique_triangles, get_triangles_as_indices
 from triangle import Triangle
 from torch import nn
@@ -60,10 +60,6 @@ def config_parser():
                         help='specific weights npy file to reload for coarse network')
 
     # rendering options
-    parser.add_argument("--N_samples", type=int, default=64, 
-                        help='number of coarse samples per ray')
-    parser.add_argument("--N_importance", type=int, default=0,
-                        help='number of additional fine samples per ray')
     parser.add_argument("--perturb", type=float, default=1.,
                         help='set to 0. for no jitter, 1. for jitter')
     parser.add_argument("--use_viewdirs", action='store_true', 
@@ -151,6 +147,7 @@ def batchify(fn, chunk):
     def ret(inputs):
         # print("chunk ", type(chunk))
         # print("inputs", inputs.dtype)
+        print("Inputs batchify: ", inputs.shape)
         inputs = inputs.to(torch.float32)
         return torch.cat([fn(inputs[i:i+chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
     return ret
@@ -159,6 +156,7 @@ def batchify(fn, chunk):
 def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
     """Prepares inputs and applies network 'fn'.
     """
+    print("Inputs run_network: ", inputs.shape)
     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
     embedded = embed_fn(inputs_flat)
 
@@ -306,7 +304,7 @@ def create_nerf(args):
     embeddirs_fn = None
     if args.use_viewdirs:
         embeddirs_fn, input_ch_views = get_embedder(args.multires_views, args.i_embed)
-    output_ch = 5 if args.N_importance > 0 else 4
+    output_ch = 4
     skips = [4]
     model = NeRF(D=args.netdepth, W=args.netwidth,
                  input_ch=input_ch, output_ch=output_ch, skips=skips,
@@ -314,11 +312,6 @@ def create_nerf(args):
     grad_vars = list(model.parameters())
 
     model_fine = None
-    if args.N_importance > 0:
-        model_fine = NeRF(D=args.netdepth_fine, W=args.netwidth_fine,
-                          input_ch=input_ch, output_ch=output_ch, skips=skips,
-                          input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
-        grad_vars += list(model_fine.parameters())
 
     network_query_fn = lambda inputs, viewdirs, network_fn : run_network(inputs, viewdirs, network_fn,
                                                                 embed_fn=embed_fn,
@@ -359,9 +352,7 @@ def create_nerf(args):
     render_kwargs_train = {
         'network_query_fn' : network_query_fn,
         'perturb' : args.perturb,
-        'N_importance' : args.N_importance,
         'network_fine' : model_fine,
-        'N_samples' : args.N_samples,
         'network_fn' : model,
         'use_viewdirs' : args.use_viewdirs,
         'white_bkgd' : args.white_bkgd,
@@ -396,11 +387,15 @@ def raw2outputs(raw, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
     """
     raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
 
+    num_rays, num_samples = raw.shape[:2]
+    # print("11111 ",num_rays, num_samples)
+    # z_vals = torch.rand((num_rays, num_samples + 1))
     # dists = z_vals[...,1:] - z_vals[...,:-1]
     # dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
-
     # dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
-    dists = torch.ones_like(raw[..., :1])
+    
+    dists = torch.ones_like(torch.randn((num_rays, num_samples)))
+    # print("dist: ", dists.shape)
     rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
     noise = 0.
     if raw_noise_std > 0.:
@@ -432,11 +427,9 @@ def raw2outputs(raw, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
 def render_rays(ray_batch,
                 network_fn,
                 network_query_fn,
-                N_samples,
                 retraw=False,
                 lindisp=False,
                 perturb=0.,
-                N_importance=0,
                 network_fine=None,
                 white_bkgd=False,
                 raw_noise_std=0.,
@@ -450,13 +443,10 @@ def render_rays(ray_batch,
       network_fn: function. Model for predicting RGB and density at each point
         in space.
       network_query_fn: function used for passing queries to network_fn.
-      N_samples: int. Number of different times to sample along each ray.
       retraw: bool. If True, include model's raw, unprocessed predictions.
       lindisp: bool. If True, sample linearly in inverse depth rather than in depth.
       perturb: float, 0 or 1. If non-zero, each ray is sampled at stratified
         random points in time.
-      N_importance: int. Number of additional times to sample along each ray.
-        These samples are only passed to network_fine.
       network_fine: "fine" network with same spec as network_fn.
       white_bkgd: bool. If True, assume a white background.
       raw_noise_std: ...
@@ -469,44 +459,39 @@ def render_rays(ray_batch,
       rgb0: See rgb_map. Output for coarse model.
       disp0: See disp_map. Output for coarse model.
       acc0: See acc_map. Output for coarse model.
-      z_std: [num_rays]. Standard deviation of distances along ray for each
-        sample.
     """
+    # pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
     N_rays = ray_batch.shape[0]
     rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each
     viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 8 else None
-    # bounds = torch.reshape(ray_batch[...,6:8], [-1,1,2])
-    # near, far = bounds[...,0], bounds[...,1] # [-1,1]
-
-    # t_vals = torch.linspace(0., 1., steps=N_samples)
-    # if not lindisp:
-    #     z_vals = near * (1.-t_vals) + far * (t_vals)
-    # else:
-    #     z_vals = 1./(1./near * (1.-t_vals) + 1./far * (t_vals))
-
-    # z_vals = z_vals.expand([N_rays, N_samples])
-
-    # if perturb > 0.:
-    #     # get intervals between samples
-    #     mids = .5 * (z_vals[...,1:] + z_vals[...,:-1])
-    #     upper = torch.cat([mids, z_vals[...,-1:]], -1)
-    #     lower = torch.cat([z_vals[...,:1], mids], -1)
-    #     # stratified samples in those intervals
-    #     t_rand = torch.rand(z_vals.shape)
-
-    #     # Pytest, overwrite u with numpy's fixed random numbers
-    #     if pytest:
-    #         np.random.seed(0)
-    #         t_rand = np.random.rand(*list(z_vals.shape))
-    #         t_rand = torch.Tensor(t_rand)
-
-    #     z_vals = lower + (upper - lower) * t_rand
+    
+    loaded_ver = torch.load('vertices.pt')
+    loaded_fa = torch.load('faces.pt')
     torch.save(rays_o, 'rays_origins.pt')
     torch.save(rays_d, 'rays_directions.pt')
     out = find_intersection_points_with_mesh(False)
-    # loaded_ver = torch.load('vertices.pt')
-    # loaded_fa = torch.load('faces.pt')
-    points=out['pts'][out['valid_point']]
+
+    # points=out['pts'][out['valid_point']]
+    # Uzyskanie punktów przecięcia w formie: [liczba promieni, maksymalna liczba punktów przecięcia, 3]
+    valid_indices = out['valid_point'].nonzero(as_tuple=True)
+    selected_pts = torch.zeros_like(out['pts'])
+    selected_pts[valid_indices[0], valid_indices[1], :] = out['pts'][valid_indices[0], valid_indices[1], :]
+    selected_pts = selected_pts.view(out['pts'].shape[0], -1, 3)
+   
+    # Wyznaczenie niezerowej liczby punktów przecięcia ( dla dwóch sfer max 4)
+    # num_nonzero_points_per_ray = torch.count_nonzero(selected_pts, dim=1)
+    # num_nonzero_points = num_nonzero_points_per_ray.max().item()
+    num_nonzero_points = 4 
+    # Posortowanie tablicy punktów by niezerowe były na początku
+    matrix = selected_pts
+    sorted_matrix = torch.stack([torch.tensor(sorted(row.tolist(), key=lambda x: x[0] == 0)) for row in matrix])
+
+    # Przypisanie punktów przecięcia sfery z promieniami 
+    output_matrix = torch.zeros((1024, num_nonzero_points, 3), dtype=torch.float64)
+    output_matrix[:, :num_nonzero_points, :] = sorted_matrix[:, :num_nonzero_points, :]
+    # plot_selected_points_on_sphere(output_matrix, loaded_ver, loaded_fa)
+    pts = output_matrix
+
     # plot_rays_mesh_and_points(
     #     rays_o,
     #     rays_d,
@@ -515,59 +500,16 @@ def render_rays(ray_batch,
     #     points,
     #     500.0,
     # )
-    # pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
 
-    # print("pts", points)
-    # print(points.shape)
-    pts = torch.zeros((1024, 1, 3))
-
-
-    num_points = min(points.shape[0], 1024)
-    pts[:num_points, 0, :] = points[:num_points, :]
 
 #     raw = run_network(pts)
     raw = network_query_fn(pts, viewdirs, network_fn)
     rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
-    if N_importance > 0:
-
-        rgb_map_0, disp_map_0, acc_map_0 = rgb_map, disp_map, acc_map
-
-        # z_vals_mid = .5 * (z_vals[...,1:] + z_vals[...,:-1])
-        # z_samples = sample_pdf(z_vals_mid, weights[...,1:-1], N_importance, det=(perturb==0.), pytest=pytest)
-        # z_samples = z_samples.detach()
-
-        # z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
-        # pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + N_importance, 3]
-
-        torch.save(rays_o, 'rays_origins.pt')
-        torch.save(rays_d, 'rays_directions.pt')
-        out = find_intersection_points_with_mesh(False)
-        points=out['pts'][out['valid_point']]
-        
-        # print("pts", points)
-        # print(points.shape)
-        pts = torch.zeros((1024, 1, 3))
-
-
-        num_points = min(points.shape[0], 1024)
-        pts[:num_points, 0, :] = points[:num_points, :]
-
-
-        run_fn = network_fn if network_fine is None else network_fine
-        # raw = run_network(pts, fn=run_fn)
-        raw = network_query_fn(pts, viewdirs, run_fn)
-
-        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
     ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map}
     if retraw:
         ret['raw'] = raw
-    if N_importance > 0:
-        ret['rgb0'] = rgb_map_0
-        ret['disp0'] = disp_map_0
-        ret['acc0'] = acc_map_0
-        # ret['z_std'] = torch.std(z_samples, dim=-1, unbiased=False)  # [N_rays]
 
     for k in ret:
         if (torch.isnan(ret[k]).any() or torch.isinf(ret[k]).any()) and DEBUG:
@@ -843,8 +785,6 @@ def train():
                 tf.contrib.summary.scalar('loss', loss)
                 tf.contrib.summary.scalar('psnr', psnr)
                 tf.contrib.summary.histogram('tran', trans)
-                if args.N_importance > 0:
-                    tf.contrib.summary.scalar('psnr0', psnr0)
 
 
             if i%args.i_img==0:
@@ -868,13 +808,6 @@ def train():
                     tf.contrib.summary.scalar('psnr_holdout', psnr)
                     tf.contrib.summary.image('rgb_holdout', target[tf.newaxis])
 
-
-                if args.N_importance > 0:
-
-                    with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
-                        tf.contrib.summary.image('rgb0', to8b(extras['rgb0'])[tf.newaxis])
-                        tf.contrib.summary.image('disp0', extras['disp0'][tf.newaxis,...,tf.newaxis])
-                        tf.contrib.summary.image('z_std', extras['z_std'][tf.newaxis,...,tf.newaxis])
         """
 
         global_step += 1
