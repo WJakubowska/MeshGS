@@ -5,7 +5,7 @@ from triangle import Triangle
 from torch import nn
 import torch 
 from utils.gs import setup_training_input
-from ray import find_intersection_points_with_mesh, get_rays, get_rays_np
+from ray import find_intersection_points_with_mesh
 import cv2
 import numpy as np
 
@@ -119,11 +119,7 @@ def config_parser():
                         help='frequency of console printout and metric loggin')
     parser.add_argument("--i_img",     type=int, default=500, 
                         help='frequency of tensorboard image logging')
-    parser.add_argument("--i_weights", type=int, default=10000, 
-                        help='frequency of weight ckpt saving')
-    parser.add_argument("--i_testset", type=int, default=50000, 
-                        help='frequency of testset saving')
-    parser.add_argument("--i_video",   type=int, default=4000, 
+    parser.add_argument("--i_video",   type=int, default=3000, 
                         help='frequency of render_poses video saving')
 
     return parser
@@ -171,12 +167,12 @@ def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
     return outputs
 
 
-def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
+def batchify_rays(vertices, faces, rays_flat, chunk=1024*32, **kwargs):
     """Render rays in smaller minibatches to avoid OOM.
     """
     all_ret = {}
     for i in range(0, rays_flat.shape[0], chunk):
-        ret = render_rays(rays_flat[i:i+chunk], **kwargs)
+        ret = render_rays(vertices, faces, rays_flat[i:i+chunk], **kwargs)
         for k in ret:
             if k not in all_ret:
                 all_ret[k] = []
@@ -186,7 +182,7 @@ def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
     return all_ret
 
 
-def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
+def render(vertices, faces, H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
                   near=0., far=1.,
                   use_viewdirs=False, c2w_staticcam=None,
                   **kwargs):
@@ -243,7 +239,7 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
         rays = torch.cat([rays, viewdirs], -1)
 
     # Render and reshape
-    all_ret = batchify_rays(rays, chunk, **kwargs)
+    all_ret = batchify_rays(vertices, faces, rays, chunk, **kwargs)
     for k in all_ret:
         k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
         all_ret[k] = torch.reshape(all_ret[k], k_sh)
@@ -254,7 +250,7 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
     return ret_list + [ret_dict]
 
 
-def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
+def render_path(vertices, faces, render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
 
     H, W, focal = hwf
 
@@ -271,7 +267,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
     for i, c2w in enumerate(tqdm(render_poses)):
         print(i, time.time() - t)
         t = time.time()
-        rgb, disp, acc, _ = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
+        rgb, disp, acc, _ = render(vertices, faces, H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
         rgbs.append(rgb.cpu().numpy())
         disps.append(disp.cpu().numpy())
         if i==0:
@@ -306,9 +302,18 @@ def create_nerf(args):
         embeddirs_fn, input_ch_views = get_embedder(args.multires_views, args.i_embed)
     output_ch = 4
     skips = [4]
+
+    vertices = torch.load('vertices.pt').double()
+    faces = torch.load('faces.pt')
+    
     model = NeRF(D=args.netdepth, W=args.netwidth,
                  input_ch=input_ch, output_ch=output_ch, skips=skips,
                  input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
+
+    model.vertices = nn.Parameter(vertices.requires_grad_(True))
+    # print("faces: ", faces.float())
+    model.faces = nn.Parameter(faces.float().requires_grad_(False))
+
     grad_vars = list(model.parameters())
 
     model_fine = None
@@ -409,7 +414,7 @@ def raw2outputs(raw, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
 
     alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
-    alpha = alpha.squeeze(-1)
+    # alpha = alpha.squeeze(-1)
     
     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
     rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
@@ -424,7 +429,9 @@ def raw2outputs(raw, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
     return rgb_map, disp_map, acc_map, weights, depth_map
 
 
-def render_rays(ray_batch,
+def render_rays(vertices, 
+                faces,
+                ray_batch,
                 network_fn,
                 network_query_fn,
                 retraw=False,
@@ -463,15 +470,15 @@ def render_rays(ray_batch,
     # pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
     N_rays = ray_batch.shape[0]
     rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each
-    print("rayd", rays_d.shape[0])
+
     
     viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 8 else None
     
-    loaded_ver = torch.load('vertices.pt')
-    loaded_fa = torch.load('faces.pt')
-    torch.save(rays_o, 'rays_origins.pt')
-    torch.save(rays_d, 'rays_directions.pt')
-    out = find_intersection_points_with_mesh(False)
+    # loaded_ver = torch.load('vertices.pt')
+    # loaded_fa = torch.load('faces.pt')
+    # torch.save(rays_o, 'rays_origins.pt')
+    # torch.save(rays_d, 'rays_directions.pt')
+    out = find_intersection_points_with_mesh(vertices, faces, rays_o, rays_d, False)
 
     # points=out['pts'][out['valid_point']]
     # Uzyskanie punktów przecięcia w formie: [liczba promieni, maksymalna liczba punktów przecięcia, 3]
@@ -532,11 +539,11 @@ def train():
     unique_triangles = get_unique_triangles(triangles)
     unique_vertices = icosphere.get_all_vertices()
     result_triangles = get_triangles_as_indices(unique_vertices, triangles)
-    xyz, features_dc, features_rest, opacity, vertices_tensor = setup_training_input(unique_vertices, result_triangles)
+    faces, features_dc, features_rest, opacity, vertices = setup_training_input(unique_vertices, result_triangles)
 
-    xyz_tensor = xyz.float().long()
-    torch.save(xyz_tensor, 'faces.pt')
-    torch.save(vertices_tensor, 'vertices.pt')
+    faces = faces.float().long()
+    torch.save(faces, 'faces.pt')
+    torch.save(vertices, 'vertices.pt')
 
 
     # Load data
@@ -617,7 +624,7 @@ def train():
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', render_poses.shape)
 
-            rgbs, _ = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor)
+            rgbs, _ = render_path(vertices, faces, render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor)
             print('Done rendering', testsavedir)
             imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
 
@@ -650,7 +657,7 @@ def train():
         rays_rgb = torch.Tensor(rays_rgb).to(device)
 
 
-    N_iters = 20000 + 1
+    N_iters = 15000 + 1
     print('Begin')
     print('TRAIN views are', i_train)
     print('TEST views are', i_test)
@@ -709,7 +716,7 @@ def train():
                 target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
 
         #####  Core optimization loop  #####
-        rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
+        rgb, disp, acc, extras = render(vertices, faces, H, W, K, chunk=args.chunk, rays=batch_rays,
                                                 verbose=i < 10, retraw=True,
                                                 **render_kwargs_train)
 
@@ -737,44 +744,16 @@ def train():
         ################################
 
         dt = time.time()-time0
-        # print(f"Step: {global_step}, Loss: {loss}, Time: {dt}")
-        #####           end            #####
 
-        # Rest is logging
-        if i%args.i_weights==0:
-            path = os.path.join(basedir, expname, '{:06d}.tar'.format(i))
-            torch.save({
-                'global_step': global_step,
-                'network_fn_state_dict': render_kwargs_train['network_fn'].state_dict(),
-                'network_fine_state_dict': render_kwargs_train['network_fine'].state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-            }, path)
-            print('Saved checkpoints at', path)
 
         if i%args.i_video==0 and i > 0:
             # Turn on testing mode
             with torch.no_grad():
-                rgbs, disps = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
+                rgbs, disps = render_path(vertices, faces, render_poses, hwf, K, args.chunk, render_kwargs_test)
             print('Done, saving', rgbs.shape, disps.shape)
             moviebase = os.path.join(basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
             imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
             imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
-
-            # if args.use_viewdirs:
-            #     render_kwargs_test['c2w_staticcam'] = render_poses[0][:3,:4]
-            #     with torch.no_grad():
-            #         rgbs_still, _ = render_path(render_poses, hwf, args.chunk, render_kwargs_test)
-            #     render_kwargs_test['c2w_staticcam'] = None
-            #     imageio.mimwrite(moviebase + 'rgb_still.mp4', to8b(rgbs_still), fps=30, quality=8)
-
-        if i%args.i_testset==0 and i > 0:
-            testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
-            os.makedirs(testsavedir, exist_ok=True)
-            print('test poses shape', poses[i_test].shape)
-            with torch.no_grad():
-                render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
-            print('Saved test set')
-
 
     
         if i%args.i_print==0:
@@ -816,6 +795,6 @@ def train():
 
 
 if __name__=='__main__':
-    torch.set_default_tensor_type('torch.cuda.FloatTensor')
+    torch.set_default_tensor_type('torch.FloatTensor')
 
     train()

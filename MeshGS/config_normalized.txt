@@ -1,4 +1,4 @@
-expname = normalized
+expname = MeshGS_vertex_faces_as_param
 basedir = ./logs
 datadir = ./data/
 dataset_type = blender

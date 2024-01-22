@@ -1,4 +1,4 @@
-from colors import SH2RGB, RGB2SH
+from utils.colors import SH2RGB, RGB2SH
 import numpy as np
 import torch
 from torch import nn
@@ -48,4 +48,4 @@ def setup_training_input(unique_vertices, result_triangles):
     print("features_dc: ", features_dc.shape)
     print("features_rest: ", features_rest.shape)
     print("opacity: ", opacity.shape)
-    return xyz, features_dc, features_rest, opacity, vertices_tensor
+    return r_triangles, features_dc, features_rest, opacity, vertices_tensor

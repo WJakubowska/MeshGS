@@ -6,12 +6,6 @@ class Icosphere:
     def __init__(self, n_subdivisions, center_point=(0, 0, 0), radius=[1]):
         self.vertices, self.triangles = self._create_icosphere(center_point, radius, n_subdivisions)
 
-    # def _project_to_unit_sphere(self, vertices):
-    #     for i in range(len(vertices)):
-    #         p = np.array([vertices[i].x, vertices[i].y, vertices[i].z])
-    #         n = np.linalg.norm(p)
-    #         vertices[i] = Vertex(p[0] / n, p[1] / n, p[2] / n)
-
     def _project_to_unit_sphere(self, vertices):
         updated_vertices = []
         for vertex in vertices:

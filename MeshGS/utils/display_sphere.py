@@ -54,7 +54,7 @@ def plot_sphere_from_tensor_with_index(vertices, triangles, show_vertices=False)
     fig = go.Figure()
 
     for triangle in triangles:
-        v0, v1, v2 = triangle  # Extract vertex indices
+        v0, v1, v2 = triangle
         x = [vertices[v0][0], vertices[v1][0], vertices[v2][0], vertices[v0][0]]
         y = [vertices[v0][1], vertices[v1][1], vertices[v2][1], vertices[v0][1]]
         z = [vertices[v0][2], vertices[v1][2], vertices[v2][2], vertices[v0][2]]
@@ -139,7 +139,6 @@ def plot_selected_points_on_sphere(selected_pts, vertices, triangles):
 
     vertices = vertices.detach().numpy()
     triangles = triangles.detach().numpy() 
-    # selected_pts = selected_pts.detach().numpy()
     
     for triangle in triangles:
         triangle_vertices = vertices[triangle]
