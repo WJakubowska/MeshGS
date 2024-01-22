@@ -795,6 +795,9 @@ def train():
 
 
 if __name__=='__main__':
-    torch.set_default_tensor_type('torch.FloatTensor')
+    if torch.cuda.is_available():
+        torch.set_default_tensor_type('torch.cuda.FloatTensor')
+    else:
+        torch.set_default_tensor_type('torch.FloatTensor')
 
     train()
