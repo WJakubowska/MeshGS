@@ -303,16 +303,33 @@ def create_nerf(args):
     output_ch = 4
     skips = [4]
 
-    vertices = torch.load('vertices.pt').double()
-    faces = torch.load('faces.pt')
-    
+    center_point = (400, 400, 0)
+    radius = [285, 140]
+    n_subdivisions = 2
+    icosphere = Icosphere(n_subdivisions, center_point, radius)
+    vertices, triangles = icosphere.vertices, icosphere.triangles
+    unique_triangles = get_unique_triangles(triangles)
+    unique_vertices = icosphere.get_all_vertices()
+    result_triangles = get_triangles_as_indices(unique_vertices, triangles)
+    faces, features_dc, features_rest, opacity, vertices = setup_training_input(unique_vertices, result_triangles)
+
+    # faces = faces.float().long()
+    # torch.save(faces, 'faces.pt')
+    # torch.save(vertices, 'vertices.pt')
+
+    # vertices = torch.load('vertices.pt').double()
+    # faces = torch.load('faces.pt')
+
+
     model = NeRF(D=args.netdepth, W=args.netwidth,
                  input_ch=input_ch, output_ch=output_ch, skips=skips,
                  input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
-
     model.vertices = nn.Parameter(vertices.requires_grad_(True))
     # print("faces: ", faces.float())
     model.faces = nn.Parameter(faces.float().requires_grad_(False))
+
+    # model.vertices = vertices
+    # model.faces = faces
 
     grad_vars = list(model.parameters())
 
@@ -374,7 +391,7 @@ def create_nerf(args):
     render_kwargs_test['perturb'] = False
     render_kwargs_test['raw_noise_std'] = 0.
 
-    return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer
+    return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer, model
 
 
 def raw2outputs(raw, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
@@ -531,19 +548,19 @@ def train():
     parser = config_parser()
     args = parser.parse_args()
 
-    center_point = (400, 400, 0)
-    radius = [285, 140]
-    n_subdivisions = 2
-    icosphere = Icosphere(n_subdivisions, center_point, radius)
-    vertices, triangles = icosphere.vertices, icosphere.triangles
-    unique_triangles = get_unique_triangles(triangles)
-    unique_vertices = icosphere.get_all_vertices()
-    result_triangles = get_triangles_as_indices(unique_vertices, triangles)
-    faces, features_dc, features_rest, opacity, vertices = setup_training_input(unique_vertices, result_triangles)
+    # center_point = (400, 400, 0)
+    # radius = [285, 140]
+    # n_subdivisions = 2
+    # icosphere = Icosphere(n_subdivisions, center_point, radius)
+    # vertices, triangles = icosphere.vertices, icosphere.triangles
+    # unique_triangles = get_unique_triangles(triangles)
+    # unique_vertices = icosphere.get_all_vertices()
+    # result_triangles = get_triangles_as_indices(unique_vertices, triangles)
+    # faces, features_dc, features_rest, opacity, vertices = setup_training_input(unique_vertices, result_triangles)
 
-    faces = faces.float().long()
-    torch.save(faces, 'faces.pt')
-    torch.save(vertices, 'vertices.pt')
+    # faces = faces.float().long()
+    # torch.save(faces, 'faces.pt')
+    # torch.save(vertices, 'vertices.pt')
 
 
     # Load data
@@ -596,7 +613,7 @@ def train():
             file.write(open(args.config, 'r').read())
 
     # Create nerf model
-    render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
+    render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer, model = create_nerf(args)
     global_step = start
 
     bds_dict = {
@@ -716,7 +733,7 @@ def train():
                 target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
 
         #####  Core optimization loop  #####
-        rgb, disp, acc, extras = render(vertices, faces, H, W, K, chunk=args.chunk, rays=batch_rays,
+        rgb, disp, acc, extras = render(model.vertices, model.faces, H, W, K, chunk=args.chunk, rays=batch_rays,
                                                 verbose=i < 10, retraw=True,
                                                 **render_kwargs_train)
 

@@ -10,7 +10,11 @@ def find_intersection_points_with_mesh(vertices, faces, rays_o, rays_d, plot: bo
         origin=rays_o,
         direction=rays_d,
     )
-
+    # print("vertices: ", vertices)
+    faces = torch.tensor(faces, dtype=torch.long)
+    # print("faces: ", faces)
+    # assert False
+    
     # vertices = torch.load('vertices.pt').double()
     # faces = torch.load('faces.pt')
 
