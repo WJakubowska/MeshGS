@@ -303,8 +303,8 @@ def create_nerf(args):
     output_ch = 4
     skips = [4]
 
-    center_point = (400, 400, 0)
-    radius = [285, 140]
+    center_point = (0, 0, 0)
+    radius = [2, 1]
     n_subdivisions = 2
     icosphere = Icosphere(n_subdivisions, center_point, radius)
     vertices, triangles = icosphere.vertices, icosphere.triangles
@@ -517,8 +517,20 @@ def render_rays(vertices,
     output_matrix = torch.zeros((rays_d.shape[0], num_nonzero_points, 3), dtype=torch.float64)
     output_matrix[:, :num_nonzero_points, :] = sorted_matrix[:, :num_nonzero_points, :]
     # print("i: ", i_iter)
-    if i_iter%100 == 0:
-        plot_selected_points_on_sphere(output_matrix, vertices, faces, 'sphere' + str(i_iter)+ '.html')
+    # if i_iter%100 == 0:
+        # plot_selected_points_on_sphere(output_matrix, vertices, faces, 'sphere' + str(i_iter)+ '.html')
+    
+    # print("Output matrix 1 : ", output_matrix.shape)
+    # print(output_matrix)
+    # plot_selected_points_on_sphere(output_matrix, vertices, faces, 'przed_dodaniem_rozkładu.html')
+    N_rays, N_samples, _ = output_matrix.shape
+    pts_gauss = np.random.normal(0, 0.1, (N_rays, N_samples, 3))
+    # print("pts: ", pts_gauss)
+    output_matrix = np.concatenate((output_matrix, pts_gauss), axis=1)
+    # print("Output matrix 2 : ", output_matrix.shape)
+    # print(output_matrix)
+    output_matrix = torch.Tensor(output_matrix)
+    # plot_selected_points_on_sphere(output_matrix, vertices, faces, 'po_dodaniu_rozkładu.html')
     pts = output_matrix
 
     # plot_rays_mesh_and_points(
