@@ -167,12 +167,12 @@ def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
     return outputs
 
 
-def batchify_rays(vertices, faces, rays_flat, chunk=1024*32, **kwargs):
+def batchify_rays(vertices, faces, i_iter,  rays_flat, chunk=1024*32, **kwargs):
     """Render rays in smaller minibatches to avoid OOM.
     """
     all_ret = {}
     for i in range(0, rays_flat.shape[0], chunk):
-        ret = render_rays(vertices, faces, rays_flat[i:i+chunk], **kwargs)
+        ret = render_rays(vertices, faces, i_iter,  rays_flat[i:i+chunk], **kwargs)
         for k in ret:
             if k not in all_ret:
                 all_ret[k] = []
@@ -182,7 +182,7 @@ def batchify_rays(vertices, faces, rays_flat, chunk=1024*32, **kwargs):
     return all_ret
 
 
-def render(vertices, faces, H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
+def render(vertices, faces, i_iter,  H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
                   near=0., far=1.,
                   use_viewdirs=False, c2w_staticcam=None,
                   **kwargs):
@@ -239,7 +239,7 @@ def render(vertices, faces, H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=Tru
         rays = torch.cat([rays, viewdirs], -1)
 
     # Render and reshape
-    all_ret = batchify_rays(vertices, faces, rays, chunk, **kwargs)
+    all_ret = batchify_rays(vertices, faces, i_iter, rays, chunk, **kwargs)
     for k in all_ret:
         k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
         all_ret[k] = torch.reshape(all_ret[k], k_sh)
@@ -250,7 +250,7 @@ def render(vertices, faces, H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=Tru
     return ret_list + [ret_dict]
 
 
-def render_path(vertices, faces, render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
+def render_path(vertices, faces, i_iter,  render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
 
     H, W, focal = hwf
 
@@ -267,7 +267,7 @@ def render_path(vertices, faces, render_poses, hwf, K, chunk, render_kwargs, gt_
     for i, c2w in enumerate(tqdm(render_poses)):
         print(i, time.time() - t)
         t = time.time()
-        rgb, disp, acc, _ = render(vertices, faces, H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
+        rgb, disp, acc, _ = render(vertices, faces, i_iter,  H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
         rgbs.append(rgb.cpu().numpy())
         disps.append(disp.cpu().numpy())
         if i==0:
@@ -448,6 +448,7 @@ def raw2outputs(raw, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
 
 def render_rays(vertices, 
                 faces,
+                i_iter,
                 ray_batch,
                 network_fn,
                 network_query_fn,
@@ -515,7 +516,9 @@ def render_rays(vertices,
     # Przypisanie punktów przecięcia sfery z promieniami 
     output_matrix = torch.zeros((rays_d.shape[0], num_nonzero_points, 3), dtype=torch.float64)
     output_matrix[:, :num_nonzero_points, :] = sorted_matrix[:, :num_nonzero_points, :]
-    # plot_selected_points_on_sphere(output_matrix, loaded_ver, loaded_fa)
+    # print("i: ", i_iter)
+    if i_iter%100 == 0:
+        plot_selected_points_on_sphere(output_matrix, vertices, faces, 'sphere' + str(i_iter)+ '.html')
     pts = output_matrix
 
     # plot_rays_mesh_and_points(
@@ -627,25 +630,25 @@ def train():
     render_poses = torch.Tensor(render_poses).to(device)
 
     # Short circuit if only rendering out from trained model
-    if args.render_only:
-        print('RENDER ONLY')
-        with torch.no_grad():
-            if args.render_test:
-                # render_test switches to test poses
-                images = images[i_test]
-            else:
-                # Default is smoother render_poses path
-                images = None
+    # if args.render_only:
+    #     print('RENDER ONLY')
+    #     with torch.no_grad():
+    #         if args.render_test:
+    #             # render_test switches to test poses
+    #             images = images[i_test]
+    #         else:
+    #             # Default is smoother render_poses path
+    #             images = None
 
-            testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format('test' if args.render_test else 'path', start))
-            os.makedirs(testsavedir, exist_ok=True)
-            print('test poses shape', render_poses.shape)
+    #         testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format('test' if args.render_test else 'path', start))
+    #         os.makedirs(testsavedir, exist_ok=True)
+    #         print('test poses shape', render_poses.shape)
 
-            rgbs, _ = render_path(vertices, faces, render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor)
-            print('Done rendering', testsavedir)
-            imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
+    #         rgbs, _ = render_path(vertices, faces, i,  render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor)
+    #         print('Done rendering', testsavedir)
+    #         imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
 
-            return
+    #         return
 
     # Prepare raybatch tensor if batching random rays
     N_rand = args.N_rand
@@ -733,7 +736,7 @@ def train():
                 target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
 
         #####  Core optimization loop  #####
-        rgb, disp, acc, extras = render(model.vertices, model.faces, H, W, K, chunk=args.chunk, rays=batch_rays,
+        rgb, disp, acc, extras = render(model.vertices, model.faces, i,  H, W, K, chunk=args.chunk, rays=batch_rays,
                                                 verbose=i < 10, retraw=True,
                                                 **render_kwargs_train)
 
@@ -766,7 +769,7 @@ def train():
         if i%args.i_video==0 and i > 0:
             # Turn on testing mode
             with torch.no_grad():
-                rgbs, disps = render_path(vertices, faces, render_poses, hwf, K, args.chunk, render_kwargs_test)
+                rgbs, disps = render_path(vertices, faces, i,  render_poses, hwf, K, args.chunk, render_kwargs_test)
             print('Done, saving', rgbs.shape, disps.shape)
             moviebase = os.path.join(basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
             imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
