@@ -19,6 +19,8 @@ import random
 import time
 import torch.nn.functional as F
 
+from ball import *
+
 
 def config_parser():
 
@@ -141,18 +143,14 @@ def batchify(fn, chunk):
     if chunk is None:
         return fn
     def ret(inputs):
-        # print("chunk ", type(chunk))
-        # print("inputs", inputs.dtype)
-        # print("Inputs batchify: ", inputs.shape)
-        inputs = inputs.to(torch.float32)
-        return torch.cat([fn(inputs[i:i+chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
+        print("Typy: ", inputs.float().dtype)
+        return torch.cat([fn(inputs.float()[i:i+chunk]) for i in range(0, inputs.float().shape[0], chunk)], 0)
     return ret
 
 
 def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
     """Prepares inputs and applies network 'fn'.
     """
-    # print("Inputs run_network: ", inputs.shape)
     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
     embedded = embed_fn(inputs_flat)
 
@@ -313,23 +311,18 @@ def create_nerf(args):
     result_triangles = get_triangles_as_indices(unique_vertices, triangles)
     faces, features_dc, features_rest, opacity, vertices = setup_training_input(unique_vertices, result_triangles)
 
-    # faces = faces.float().long()
-    # torch.save(faces, 'faces.pt')
-    # torch.save(vertices, 'vertices.pt')
-
-    # vertices = torch.load('vertices.pt').double()
-    # faces = torch.load('faces.pt')
-
+    # vertices, triangles = create_sphere_mesh(2, 20)
+    # result_triangles = get_triangles_as_indices(vertices, triangles)
+    # faces, features_dc, features_rest, opacity, vertices = setup_training_input(vertices, result_triangles)
 
     model = NeRF(D=args.netdepth, W=args.netwidth,
                  input_ch=input_ch, output_ch=output_ch, skips=skips,
                  input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
-    model.vertices = nn.Parameter(vertices.requires_grad_(True))
-    # print("faces: ", faces.float())
-    model.faces = nn.Parameter(faces.float().requires_grad_(False))
+    model.vertices = nn.Parameter(vertices, requires_grad =True)
+    model.faces = nn.Parameter(faces.float(), requires_grad=False)
 
-    # model.vertices = vertices
-    # model.faces = faces
+    # print(f'Vertices requires_grad: {model.vertices.requires_grad}')
+    # print(f'Faces requires_grad: {model.faces.requires_grad}')
 
     grad_vars = list(model.parameters())
 
@@ -342,6 +335,17 @@ def create_nerf(args):
 
     # Create optimizer
     optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
+
+    # for name, param in model.named_parameters():
+    #     print(name)
+
+    # for key in optimizer.state_dict().keys():
+    #     print(key)
+
+    # for param in optimizer.param_groups[0]['params']:
+    #     print(param)
+
+
 
     start = 0
     basedir = args.basedir
@@ -394,7 +398,7 @@ def create_nerf(args):
     return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer, model
 
 
-def raw2outputs(raw, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
+def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
     """Transforms model's predictions to semantically meaningful values.
     Args:
         raw: [num_rays, num_samples along ray, 4]. Prediction from model.
@@ -409,15 +413,11 @@ def raw2outputs(raw, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
     """
     raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
 
-    num_rays, num_samples = raw.shape[:2]
-    # print("11111 ",num_rays, num_samples)
-    # z_vals = torch.rand((num_rays, num_samples + 1))
-    # dists = z_vals[...,1:] - z_vals[...,:-1]
-    # dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
-    # dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
-    
-    dists = torch.ones_like(torch.randn((num_rays, num_samples)))
-    # print("dist: ", dists.shape)
+    dists = z_vals[...,1:] - z_vals[...,:-1]
+    dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
+
+    dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
+
     rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
     noise = 0.
     if raw_noise_std > 0.:
@@ -431,12 +431,10 @@ def raw2outputs(raw, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
 
     alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
-    # alpha = alpha.squeeze(-1)
-    
     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
     rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
 
-    depth_map = torch.sum(weights, -1) 
+    depth_map = torch.sum(weights * z_vals, -1)
     disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
     acc_map = torch.sum(weights, -1)
 
@@ -444,6 +442,58 @@ def raw2outputs(raw, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
         rgb_map = rgb_map + (1.-acc_map[...,None])
 
     return rgb_map, disp_map, acc_map, weights, depth_map
+
+
+# def raw2outputs(raw, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
+#     """Transforms model's predictions to semantically meaningful values.
+#     Args:
+#         raw: [num_rays, num_samples along ray, 4]. Prediction from model.
+#         z_vals: [num_rays, num_samples along ray]. Integration time.
+#         rays_d: [num_rays, 3]. Direction of each ray.
+#     Returns:
+#         rgb_map: [num_rays, 3]. Estimated RGB color of a ray.
+#         disp_map: [num_rays]. Disparity map. Inverse of depth map.
+#         acc_map: [num_rays]. Sum of weights along each ray.
+#         weights: [num_rays, num_samples]. Weights assigned to each sampled color.
+#         depth_map: [num_rays]. Estimated distance to object.
+#     """
+#     raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
+
+#     num_rays, num_samples = raw.shape[:2]
+
+#     # z_vals = torch.rand((num_rays, num_samples + 1))
+#     # dists = z_vals[...,1:] - z_vals[...,:-1]
+#     # dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
+#     # dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
+    
+#     dists = torch.ones_like(torch.randn((num_rays, num_samples)))
+
+#     rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
+#     noise = 0.
+#     if raw_noise_std > 0.:
+#         noise = torch.randn(raw[...,3].shape) * raw_noise_std
+
+#         # Overwrite randomly sampled data if pytest
+#         if pytest:
+#             np.random.seed(0)
+#             noise = np.random.rand(*list(raw[...,3].shape)) * raw_noise_std
+#             noise = torch.Tensor(noise)
+
+#     alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
+#     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
+
+    
+#     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
+#     rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
+
+#     depth_map = torch.sum(weights, -1) 
+#     disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
+#     acc_map = torch.sum(weights, -1)
+
+#     if white_bkgd:
+#         rgb_map = rgb_map + (1.-acc_map[...,None])
+
+#     return rgb_map, disp_map, acc_map, weights, depth_map
 
 
 def render_rays(vertices, 
@@ -488,17 +538,10 @@ def render_rays(vertices,
     # pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
     N_rays = ray_batch.shape[0]
     rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each
-
-    
     viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 8 else None
     
-    # loaded_ver = torch.load('vertices.pt')
-    # loaded_fa = torch.load('faces.pt')
-    # torch.save(rays_o, 'rays_origins.pt')
-    # torch.save(rays_d, 'rays_directions.pt')
     out = find_intersection_points_with_mesh(vertices, faces, rays_o, rays_d, False)
 
-    # points=out['pts'][out['valid_point']]
     # Uzyskanie punktów przecięcia w formie: [liczba promieni, maksymalna liczba punktów przecięcia, 3]
     valid_indices = out['valid_point'].nonzero(as_tuple=True)
     selected_pts = torch.zeros_like(out['pts'])
@@ -516,36 +559,28 @@ def render_rays(vertices,
     # Przypisanie punktów przecięcia sfery z promieniami 
     output_matrix = torch.zeros((rays_d.shape[0], num_nonzero_points, 3), dtype=torch.float64)
     output_matrix[:, :num_nonzero_points, :] = sorted_matrix[:, :num_nonzero_points, :]
-    # print("i: ", i_iter)
+
     # if i_iter%100 == 0:
-        # plot_selected_points_on_sphere(output_matrix, vertices, faces, 'sphere' + str(i_iter)+ '.html')
+        # plot_selected_points_on_sphere(output_matrix, vertices, faces, 'sphere_faces_required_grad' + str(i_iter)+ '.html')
     
-    # print("Output matrix 1 : ", output_matrix.shape)
-    # print(output_matrix)
     # plot_selected_points_on_sphere(output_matrix, vertices, faces, 'przed_dodaniem_rozkładu.html')
-    N_rays, N_samples, _ = output_matrix.shape
-    pts_gauss = np.random.normal(0, 0.1, (N_rays, N_samples, 3))
-    # print("pts: ", pts_gauss)
-    output_matrix = np.concatenate((output_matrix, pts_gauss), axis=1)
-    # print("Output matrix 2 : ", output_matrix.shape)
-    # print(output_matrix)
-    output_matrix = torch.Tensor(output_matrix)
-    # plot_selected_points_on_sphere(output_matrix, vertices, faces, 'po_dodaniu_rozkładu.html')
+    
+    ### GAUSS ###############################################
+    # N_rays, N_samples, _ = output_matrix.shape
+    # pts_gauss = np.random.normal(0, 0.1, (N_rays, N_samples, 3))
+    # pts_gauss1 = np.random.normal(0, 0.1, (N_rays, N_samples, 3))
+    # pts_gauss2 = np.random.normal(0, 0.1, (N_rays, N_samples, 3))
+    # output_matrix = np.concatenate((output_matrix.cpu(), pts_gauss, pts_gauss1, pts_gauss2, pts_gauss, pts_gauss1, pts_gauss2, pts_gauss1, pts_gauss1, pts_gauss1), axis=1)
+    # print("Rozmair output:", output_matrix.shape)
+    # output_matrix = torch.Tensor(output_matrix)
+
+    
     pts = output_matrix
+    z_vals = torch.norm(output_matrix - rays_o.unsqueeze(1), dim=-1)
+    # print("Z_vals: ", z_vals.shape)
 
-    # plot_rays_mesh_and_points(
-    #     rays_o,
-    #     rays_d,
-    #     loaded_ver,
-    #     loaded_fa,
-    #     points,
-    #     500.0,
-    # )
-
-
-#     raw = run_network(pts)
     raw = network_query_fn(pts, viewdirs, network_fn)
-    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
 
     ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map}
@@ -562,21 +597,6 @@ def train():
 
     parser = config_parser()
     args = parser.parse_args()
-
-    # center_point = (400, 400, 0)
-    # radius = [285, 140]
-    # n_subdivisions = 2
-    # icosphere = Icosphere(n_subdivisions, center_point, radius)
-    # vertices, triangles = icosphere.vertices, icosphere.triangles
-    # unique_triangles = get_unique_triangles(triangles)
-    # unique_vertices = icosphere.get_all_vertices()
-    # result_triangles = get_triangles_as_indices(unique_vertices, triangles)
-    # faces, features_dc, features_rest, opacity, vertices = setup_training_input(unique_vertices, result_triangles)
-
-    # faces = faces.float().long()
-    # torch.save(faces, 'faces.pt')
-    # torch.save(vertices, 'vertices.pt')
-
 
     # Load data
     K = None
@@ -641,27 +661,6 @@ def train():
     # Move testing data to GPU
     render_poses = torch.Tensor(render_poses).to(device)
 
-    # Short circuit if only rendering out from trained model
-    # if args.render_only:
-    #     print('RENDER ONLY')
-    #     with torch.no_grad():
-    #         if args.render_test:
-    #             # render_test switches to test poses
-    #             images = images[i_test]
-    #         else:
-    #             # Default is smoother render_poses path
-    #             images = None
-
-    #         testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format('test' if args.render_test else 'path', start))
-    #         os.makedirs(testsavedir, exist_ok=True)
-    #         print('test poses shape', render_poses.shape)
-
-    #         rgbs, _ = render_path(vertices, faces, i,  render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor)
-    #         print('Done rendering', testsavedir)
-    #         imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
-
-    #         return
-
     # Prepare raybatch tensor if batching random rays
     N_rand = args.N_rand
     use_batching = not args.no_batching
@@ -695,12 +694,17 @@ def train():
     print('TEST views are', i_test)
     print('VAL views are', i_val)
 
-    # Summary writers
-    # writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
-    
+    prev_param_values = {}
+
     start = start + 1
+
+
     for i in trange(start, N_iters):
         time0 = time.time()
+        model.train()
+
+        # print(f'Vertices requires_grad: {model.vertices.requires_grad}')
+        # print(f'Faces requires_grad: {model.faces.requires_grad}')
 
         # Sample random ray batch
         if use_batching:
@@ -748,11 +752,17 @@ def train():
                 target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
 
         #####  Core optimization loop  #####
-        rgb, disp, acc, extras = render(model.vertices, model.faces, i,  H, W, K, chunk=args.chunk, rays=batch_rays,
+        optimizer.zero_grad()
+        vertices = model.get_vertices()
+        faces = model.get_faces()
+
+        rgb, disp, acc, extras = render(vertices, faces, i,  H, W, K, chunk=args.chunk, rays=batch_rays,
                                                 verbose=i < 10, retraw=True,
                                                 **render_kwargs_train)
 
-        optimizer.zero_grad()
+
+
+        
         img_loss = img2mse(rgb, target_s)
         trans = extras['raw'][...,-1]
         loss = img_loss
@@ -763,8 +773,34 @@ def train():
             loss = loss + img_loss0
             psnr0 = mse2psnr(img_loss0)
 
+        # for param in model.parameters():
+        #     print(param.grad)
+     
+
+        # print("Before loss.backward()")    
+        # for name, param in model.named_parameters():
+        #     if 'vertices' in name or 'faces' in name:
+        #         print(f'Parameter name: {name}, Gradient: {param}')
+        
         loss.backward()
         optimizer.step()
+
+        # print("After loss.backward()")    
+        # for name, param in model.named_parameters():
+        #     if 'vertices' in name or 'faces' in name:
+        #         print(f'Parameter name: {name}, Gradient: {param}')
+        
+        for name, param in model.named_parameters():
+            if 'vertices' in name or 'faces' in name:
+                prev_value = prev_param_values.get(name)
+                if prev_value is not None and torch.equal(prev_value, param):
+                    print(f'Parametr {name} nie zmienił wartości po aktualizacji.')
+                else:
+                    print(f'  ZMIAAAANAAAAAAAAAAAAAAAAAAAAAAAA Parametr {name} zmienił wartość po aktualizacji:')
+                    # print(f'Wartość przed aktualizacją: {prev_value}')
+                    # print(f'Nowa wartość po aktualizacji: {param}')
+                    # print(f'Gradient parametru po aktualizacji: {param.grad}')
+                prev_param_values[name] = param.clone().detach()
 
         # NOTE: IMPORTANT!
         ###   update learning rate   ###
@@ -790,38 +826,6 @@ def train():
     
         if i%args.i_print==0:
             tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
-        """
-            print(expname, i, psnr.numpy(), loss.numpy(), global_step.numpy())
-            print('iter time {:.05f}'.format(dt))
-
-            with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_print):
-                tf.contrib.summary.scalar('loss', loss)
-                tf.contrib.summary.scalar('psnr', psnr)
-                tf.contrib.summary.histogram('tran', trans)
-
-
-            if i%args.i_img==0:
-
-                # Log a rendered validation view to Tensorboard
-                img_i=np.random.choice(i_val)
-                target = images[img_i]
-                pose = poses[img_i, :3,:4]
-                with torch.no_grad():
-                    rgb, disp, acc, extras = render(H, W, focal, chunk=args.chunk, c2w=pose,
-                                                        **render_kwargs_test)
-
-                psnr = mse2psnr(img2mse(rgb, target))
-
-                with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
-
-                    tf.contrib.summary.image('rgb', to8b(rgb)[tf.newaxis])
-                    tf.contrib.summary.image('disp', disp[tf.newaxis,...,tf.newaxis])
-                    tf.contrib.summary.image('acc', acc[tf.newaxis,...,tf.newaxis])
-
-                    tf.contrib.summary.scalar('psnr_holdout', psnr)
-                    tf.contrib.summary.image('rgb_holdout', target[tf.newaxis])
-
-        """
 
         global_step += 1
 

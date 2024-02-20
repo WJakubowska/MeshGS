@@ -2,6 +2,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from utils.triangles_utils import get_unique_triangles, get_triangles_as_indices
+from icosphere import Icosphere
+from triangle import Triangle
+from utils.gs import setup_training_input
 
 
 # Misc
@@ -76,6 +80,7 @@ class NeRF(nn.Module):
         self.use_viewdirs = use_viewdirs
         self.vertices = None
         self.faces = None
+
         self.pts_linears = nn.ModuleList(
             [nn.Linear(input_ch, W)] + [nn.Linear(W, W) if i not in self.skips else nn.Linear(W + input_ch, W) for i in range(D-1)])
         
@@ -92,6 +97,7 @@ class NeRF(nn.Module):
             self.rgb_linear = nn.Linear(W//2, 3)
         else:
             self.output_linear = nn.Linear(W, output_ch)
+
 
     def forward(self, x):
         input_pts, input_views = torch.split(x, [self.input_ch, self.input_ch_views], dim=-1)
@@ -116,36 +122,42 @@ class NeRF(nn.Module):
         else:
             outputs = self.output_linear(h)
 
-        return outputs    
+        return outputs   
 
-    def load_weights_from_keras(self, weights):
-        assert self.use_viewdirs, "Not implemented if use_viewdirs=False"
+    def get_vertices(self):
+        return self.vertices
+
+    def get_faces(self):
+        return self.faces    
+
+    # def load_weights_from_keras(self, weights):
+    #     assert self.use_viewdirs, "Not implemented if use_viewdirs=False"
         
-        # Load pts_linears
-        for i in range(self.D):
-            idx_pts_linears = 2 * i
-            self.pts_linears[i].weight.data = torch.from_numpy(np.transpose(weights[idx_pts_linears]))    
-            self.pts_linears[i].bias.data = torch.from_numpy(np.transpose(weights[idx_pts_linears+1]))
+    #     # Load pts_linears
+    #     for i in range(self.D):
+    #         idx_pts_linears = 2 * i
+    #         self.pts_linears[i].weight.data = torch.from_numpy(np.transpose(weights[idx_pts_linears]))    
+    #         self.pts_linears[i].bias.data = torch.from_numpy(np.transpose(weights[idx_pts_linears+1]))
         
-        # Load feature_linear
-        idx_feature_linear = 2 * self.D
-        self.feature_linear.weight.data = torch.from_numpy(np.transpose(weights[idx_feature_linear]))
-        self.feature_linear.bias.data = torch.from_numpy(np.transpose(weights[idx_feature_linear+1]))
+    #     # Load feature_linear
+    #     idx_feature_linear = 2 * self.D
+    #     self.feature_linear.weight.data = torch.from_numpy(np.transpose(weights[idx_feature_linear]))
+    #     self.feature_linear.bias.data = torch.from_numpy(np.transpose(weights[idx_feature_linear+1]))
 
-        # Load views_linears
-        idx_views_linears = 2 * self.D + 2
-        self.views_linears[0].weight.data = torch.from_numpy(np.transpose(weights[idx_views_linears]))
-        self.views_linears[0].bias.data = torch.from_numpy(np.transpose(weights[idx_views_linears+1]))
+    #     # Load views_linears
+    #     idx_views_linears = 2 * self.D + 2
+    #     self.views_linears[0].weight.data = torch.from_numpy(np.transpose(weights[idx_views_linears]))
+    #     self.views_linears[0].bias.data = torch.from_numpy(np.transpose(weights[idx_views_linears+1]))
 
-        # Load rgb_linear
-        idx_rbg_linear = 2 * self.D + 4
-        self.rgb_linear.weight.data = torch.from_numpy(np.transpose(weights[idx_rbg_linear]))
-        self.rgb_linear.bias.data = torch.from_numpy(np.transpose(weights[idx_rbg_linear+1]))
+    #     # Load rgb_linear
+    #     idx_rbg_linear = 2 * self.D + 4
+    #     self.rgb_linear.weight.data = torch.from_numpy(np.transpose(weights[idx_rbg_linear]))
+    #     self.rgb_linear.bias.data = torch.from_numpy(np.transpose(weights[idx_rbg_linear+1]))
 
-        # Load alpha_linear
-        idx_alpha_linear = 2 * self.D + 6
-        self.alpha_linear.weight.data = torch.from_numpy(np.transpose(weights[idx_alpha_linear]))
-        self.alpha_linear.bias.data = torch.from_numpy(np.transpose(weights[idx_alpha_linear+1]))
+    #     # Load alpha_linear
+    #     idx_alpha_linear = 2 * self.D + 6
+    #     self.alpha_linear.weight.data = torch.from_numpy(np.transpose(weights[idx_alpha_linear]))
+    #     self.alpha_linear.bias.data = torch.from_numpy(np.transpose(weights[idx_alpha_linear+1]))
 
 
 
@@ -237,3 +249,43 @@ def ndc_rays(H, W, focal, near, rays_o, rays_d):
 #     samples = bins_g[...,0] + t * (bins_g[...,1]-bins_g[...,0])
 
 #     return samples
+
+
+# import numpy as np
+
+# def generate_points_around_intersection_point(mesh, intersection_point, num_points=10, radius=0.1):
+#     """
+#     Generuje punkty wokół punktu przecięcia mesh z promieniem.
+
+#     Parametry:
+#     - mesh: obiekt reprezentujący mesha
+#     - intersection_point: punkt przecięcia z promieniem
+#     - num_points: liczba punktów do wygenerowania
+#     - radius: promień okręgu, na którym będą generowane punkty
+
+#     Zwraca:
+#     - points: wygenerowane punkty
+#     """
+
+#     # Wygeneruj równomiernie rozłożone kąty
+#     angles = np.linspace(0, 2*np.pi, num_points, endpoint=False)
+
+#     # Przekształć kąty na współrzędne x, y
+#     x_coords = radius * np.cos(angles)
+#     y_coords = radius * np.sin(angles)
+
+#     # Stwórz macierz przekształcenia z lokalnych współrzędnych na globalne współrzędne
+#     transformation_matrix = np.vstack([mesh.face_normals, mesh.face_normals.cross(np.array([1, 0, 0]))])
+#     transformation_matrix = transformation_matrix / np.linalg.norm(transformation_matrix, axis=1)[:, np.newaxis]
+
+#     # Przekształć lokalne współrzędne na globalne współrzędne
+#     transformed_points = np.dot(transformation_matrix, np.vstack([x_coords, y_coords, np.zeros_like(x_coords)]))
+
+#     # Dodaj przesunięcie do punktu przecięcia
+#     points = transformed_points.T + intersection_point
+
+#     return points
+
+# Przykład użycia
+# mesh to obiekt zawierający informacje o meshe, a intersection_point to punkt przecięcia z promieniem
+# points = generate_points_around_intersection_point(mesh, intersection_point, num_points=10, radius=0.1)
