@@ -2,29 +2,13 @@
 # from ray_tracing.mesh import Mesh
 import torch
 import numpy as np
+import plotly.graph_objects as go
 
-class Mesh:
-    """Mesh in 3D space, Mash triangle mesh is a type of polygon mesh."""
+import plotly.graph_objects as go
+import plotly.io as pio
+from pathlib import Path
 
-    def __init__(
-            self,
-            vertices: torch.Tensor,
-            faces: torch.Tensor
-    ):
-        """Initialize Mesh based on triangles and theirs vertices vectors.
-
-        Each triangle in the mesh is defined by vertices in 3D space.
-        The mesh is defined with the help of indexes of triangles called faces.
-        Args:
-            vertices: torch.Tensor with shape (N, 3),
-             where N is the number of vertices, and 3 corresponds to
-             a set of three coordinates defining a point in 3D space.
-            faces: torch.Tensor with shape (N, 3).
-
-        """
-        self.vertices = vertices
-        self.faces = faces
-
+from torch.optim import Adam
 
 class Rays:
     """Lines in 3D space, each has an origin point and a direction vector."""
@@ -54,21 +38,13 @@ class Rays:
 
     def find_intersection_points_with_mesh(
         self,
-        mesh: Mesh,
+        vertices: torch.Tensor,
+        faces: torch.Tensor
     ):
-        """
-        Find points on the mesh, determined by intersecting rays with the mesh.
+        print(f'Vertices requires_grad in ray: {vertices.requires_grad}')
+        print(f'Faces requires_grad in ray: {faces.requires_grad}')
 
-        Args:
-            mesh: Mesh,
-             triangle mesh defined by faces and vertices.
-            plot: bool
-             if True plot rays, mesh and intersection points
-        Return:
-            # TODO
-
-        """
-        triangle_vertices = mesh.vertices[mesh.faces]
+        triangle_vertices = vertices[faces]
 
         num_rays = self.origin.shape[0]
         num_triangles = triangle_vertices.shape[0]
@@ -84,23 +60,21 @@ class Rays:
         n_ = n / torch.linalg.norm(n, dim=1, keepdim=True)  # Normalized normal
 
         # expand
-        n_expanded = n_.expand(num_rays, num_triangles, 3)
+        n_expanded = n_.unsqueeze(0).expand(num_rays, num_triangles, 3)
 
-        ray_origins_expanded = self.origin.view(
-            num_rays, 1, 3
-        ).expand(num_rays, num_triangles, 3)
+        ray_origins_expanded = self.origin.unsqueeze(1).expand(num_rays, num_triangles, 3)
 
         ray_directions_norm = self.direction / torch.linalg.norm(
             self.direction, dim=1, keepdim=True
         )  # Unit vector (versor) of e => ê
 
-        ray_directions_norm_expanded = ray_directions_norm.view(
-            num_rays, 1, 3
-        ).expand(num_rays, num_triangles, 3)
+        ray_directions_norm_expanded = ray_directions_norm.unsqueeze(1).expand(
+            num_rays, num_triangles, 3
+        )
 
-        A_expand = A.expand(num_rays, num_triangles, 3)
-        B_expand = B.expand(num_rays, num_triangles, 3)
-        C_expand = C.expand(num_rays, num_triangles, 3)
+        A_expand = A.unsqueeze(0).expand(num_rays, num_triangles, 3)
+        B_expand = B.unsqueeze(0).expand(num_rays, num_triangles, 3)
+        C_expand = C.unsqueeze(0).expand(num_rays, num_triangles, 3)
 
         # Using the point A to find d
         d = -(n_expanded * A_expand).sum(dim=-1)
@@ -111,9 +85,7 @@ class Rays:
         t /= tt
 
         # Finding P [num_rays, num_triangles, 3D point]
-        pts = ray_origins_expanded + t.view(
-            num_rays, num_triangles, 1
-        ) * ray_directions_norm_expanded
+        pts = ray_origins_expanded + t.unsqueeze(-1) * ray_directions_norm_expanded
 
         # Get the resulting vector for each vertex
         # following the construction order
@@ -133,7 +105,7 @@ class Rays:
 
         idx = d_valid_inv.abs().min(dim=1).indices
         nearest_valid_point_mask = torch.zeros_like(d_valid_inv)
-        nearest_valid_point_mask[range(num_rays), idx] = 1
+        nearest_valid_point_mask[torch.arange(num_rays), idx] = 1
         nearest_valid_point_mask = (d_valid_inv != 0) * nearest_valid_point_mask
 
         idxs = torch.where(nearest_valid_point_mask == 1)
@@ -157,36 +129,112 @@ class Rays:
             'Pb': Pb,
             'Pc': Pc
         }
-
-        # mesh.vertices = vertices
-        # mesh.faces = faces
         
         return out
 
-
-
-
-
-
-def find_intersection_points_with_mesh(vertices, faces, rays_o, rays_d, plot: bool = True):
+def find_intersection_points_with_mesh(vertices, faces, rays_o, rays_d):
 
     rays = Rays(
         origin=rays_o,
         direction=rays_d,
     )
 
+    print(f'Vertices requires_grad in find: {vertices.requires_grad}')
+    print(f'Faces requires_grad in find: {faces.requires_grad}')
+    
 
-    mesh = Mesh(
+    out = rays.find_intersection_points_with_mesh(
         vertices=vertices,
         faces=faces.long()
     )
 
-    out = rays.find_intersection_points_with_mesh(
-        mesh=mesh
-    )
-
-    vertices = mesh.vertices
-    faces = mesh.faces
+    print(f'Vertices requires_grad in find 2: {vertices.requires_grad}')
+    print(f'Faces requires_grad in find 2: {faces.requires_grad}')
+    
 
     return out
+
+
+# vertices = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], requires_grad=True)
+# faces = torch.tensor([[0, 1, 2]], requires_grad=False)
+# target_point = torch.tensor([0.5, 0.5, 0.0] , requires_grad=True) 
+# target_face = faces[0]
+
+# num_rays = 100
+# ray_origins = torch.rand(num_rays, 3 , requires_grad=False)
+# ray_directions = torch.tensor([[0.0, 0.0, 1.0]], requires_grad=False).repeat(num_rays, 1)
+
+# rays = Rays(ray_origins, ray_directions)
+# optimizer = Adam([target_point], lr=0.1)
+
+# for i in range(100):
+#     optimizer.zero_grad()
+#     pts = rays.find_intersection_points_with_mesh(vertices, faces)
+#     distances = torch.norm(pts['pts_nearest_each_ray'] - target_point, dim=1)
+#     loss = torch.mean(distances)
+#     loss.backward()
+#     optimizer.step() 
+#     print(f"Iteration {i+1}, Loss: {loss.item()}")
+# print("Optimal point:", target_point)
+
+
+# class RayTracer:
+#     def __init__(self, rays_o, rays_d):
+#         self.rays_o = rays_o
+#         self.rays_d = rays_d
+
+#     def find_intersection_points_with_mesh(self, vertices, faces):
+#         faces = faces.long()
+    
+#         A = vertices[faces[:, 0]] 
+#         B = vertices[faces[:, 1]] 
+#         C = vertices[faces[:, 2]]  
+
+
+#         AB = B - A
+#         AC = C - A
+#         face_normals = torch.cross(AB, AC)
+
+  
+#         denom = torch.sum(face_normals.unsqueeze(0) * self.rays_d.unsqueeze(1), dim=-1)
+
+
+#         valid_ray_mask = torch.abs(denom) > 1e-6
+
+#         AO = A.unsqueeze(0) - self.rays_o.unsqueeze(1)
+#         t = torch.sum(AO.unsqueeze(2) * face_normals.unsqueeze(0), dim=-1) / denom.unsqueeze(1)
+#         t[~valid_ray_mask] = float('inf')
+#         min_t, min_idx = torch.min(t, dim=1)
+#         intersection_points = self.rays_o.unsqueeze(1) + min_t.unsqueeze(2) * self.rays_d.unsqueeze(1)
+
+
+#         fig = go.Figure(data=[
+#             go.Scatter3d(
+#                 x=intersection_points.detach().numpy()[:, :, 0].flatten(),
+#                 y=intersection_points.detach().numpy()[:, :, 1].flatten(),
+#                 z=intersection_points.detach().numpy()[:, :, 2].flatten(),
+#                 mode='markers',
+#                 marker=dict(
+#                     size=5,
+#                     color='blue',
+#                     opacity=0.8
+#                 )
+#             )
+#         ])
+#         fig.update_layout(scene=dict(
+#             xaxis_title='X',
+#             yaxis_title='Y',
+#             zaxis_title='Z'
+#         ))
+#         dir = 'images'
+#         Path(dir).mkdir(parents=True, exist_ok=True)
+#         name = "points.html"
+#         fig.write_html(
+#             f'{dir}/{name}', auto_open=True
+#         )
+
+
+#         print("SHAAAAAAAAPE: ", intersection_points.shape)
+#         print(intersection_points)
+#         return intersection_points
 

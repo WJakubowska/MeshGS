@@ -5,7 +5,7 @@ from triangle import Triangle
 from torch import nn
 import torch 
 from utils.gs import setup_training_input
-from ray import find_intersection_points_with_mesh
+from ray import *
 import cv2
 import numpy as np
 
@@ -21,6 +21,9 @@ import torch.nn.functional as F
 
 from ball import *
 
+import plotly.graph_objects as go
+import plotly.io as pio
+from pathlib import Path
 
 def config_parser():
 
@@ -398,53 +401,7 @@ def create_nerf(args):
     return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer, model
 
 
-def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
-    """Transforms model's predictions to semantically meaningful values.
-    Args:
-        raw: [num_rays, num_samples along ray, 4]. Prediction from model.
-        z_vals: [num_rays, num_samples along ray]. Integration time.
-        rays_d: [num_rays, 3]. Direction of each ray.
-    Returns:
-        rgb_map: [num_rays, 3]. Estimated RGB color of a ray.
-        disp_map: [num_rays]. Disparity map. Inverse of depth map.
-        acc_map: [num_rays]. Sum of weights along each ray.
-        weights: [num_rays, num_samples]. Weights assigned to each sampled color.
-        depth_map: [num_rays]. Estimated distance to object.
-    """
-    raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
-
-    dists = z_vals[...,1:] - z_vals[...,:-1]
-    dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
-
-    dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
-
-    rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
-    noise = 0.
-    if raw_noise_std > 0.:
-        noise = torch.randn(raw[...,3].shape) * raw_noise_std
-
-        # Overwrite randomly sampled data if pytest
-        if pytest:
-            np.random.seed(0)
-            noise = np.random.rand(*list(raw[...,3].shape)) * raw_noise_std
-            noise = torch.Tensor(noise)
-
-    alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
-    # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
-    weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
-    rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
-
-    depth_map = torch.sum(weights * z_vals, -1)
-    disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
-    acc_map = torch.sum(weights, -1)
-
-    if white_bkgd:
-        rgb_map = rgb_map + (1.-acc_map[...,None])
-
-    return rgb_map, disp_map, acc_map, weights, depth_map
-
-
-# def raw2outputs(raw, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
+# def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
 #     """Transforms model's predictions to semantically meaningful values.
 #     Args:
 #         raw: [num_rays, num_samples along ray, 4]. Prediction from model.
@@ -459,14 +416,10 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
 #     """
 #     raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
 
-#     num_rays, num_samples = raw.shape[:2]
+#     dists = z_vals[...,1:] - z_vals[...,:-1]
+#     dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
 
-#     # z_vals = torch.rand((num_rays, num_samples + 1))
-#     # dists = z_vals[...,1:] - z_vals[...,:-1]
-#     # dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
-#     # dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
-    
-#     dists = torch.ones_like(torch.randn((num_rays, num_samples)))
+#     dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
 
 #     rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
 #     noise = 0.
@@ -481,12 +434,10 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
 
 #     alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
 #     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
-
-    
 #     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
 #     rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
 
-#     depth_map = torch.sum(weights, -1) 
+#     depth_map = torch.sum(weights * z_vals, -1)
 #     disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
 #     acc_map = torch.sum(weights, -1)
 
@@ -494,6 +445,70 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
 #         rgb_map = rgb_map + (1.-acc_map[...,None])
 
 #     return rgb_map, disp_map, acc_map, weights, depth_map
+
+
+def raw2outputs(raw, output_matrix, vertices, faces, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
+    """Transforms model's predictions to semantically meaningful values.
+    Args:
+        raw: [num_rays, num_samples along ray, 4]. Prediction from model.
+        z_vals: [num_rays, num_samples along ray]. Integration time.
+        rays_d: [num_rays, 3]. Direction of each ray.
+    Returns:
+        rgb_map: [num_rays, 3]. Estimated RGB color of a ray.
+        disp_map: [num_rays]. Disparity map. Inverse of depth map.
+        acc_map: [num_rays]. Sum of weights along each ray.
+        weights: [num_rays, num_samples]. Weights assigned to each sampled color.
+        depth_map: [num_rays]. Estimated distance to object.
+    """
+    faces = faces.long()
+    print(f'Vertices requires_grad in raw2outputs: {vertices.requires_grad}')
+    print(f'Faces requires_grad  in raw2outputs: {faces.requires_grad}')
+
+    raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
+
+    num_rays, num_samples = raw.shape[:2]
+
+    # z_vals = torch.rand((num_rays, num_samples + 1))
+    # dists = z_vals[...,1:] - z_vals[...,:-1]
+    # dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
+    # dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
+
+    # dists = torch.ones_like(torch.randn((num_rays, num_samples)))
+
+    # _rays_d = rays_d[:, None, :].repeat(1, num_samples, 1)
+    # dists = torch.norm(output_matrix - _rays_d, dim=-1)
+    
+        # Calculate distances between output_matrix and vertices
+    _vertices = vertices.unsqueeze(0).unsqueeze(1)  # [1, 1, num_vertices, 3]
+    _output_matrix = output_matrix.unsqueeze(2)  # [num_rays, num_samples, 1, 3]
+    dists = torch.norm(_output_matrix - _vertices, dim=-1)  # [num_rays, num_samples, num_vertices]
+
+    # Find minimum distances along vertices
+    dists = torch.min(dists, dim=-1)[0]  # [num_rays, num_samples]
+    # print("Sahpe: ", output_matrix.shape, vertices.shape, faces.shape, rays_d.shape)
+
+
+    rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
+    noise = 0.
+    if raw_noise_std > 0.:
+        noise = torch.randn(raw[...,3].shape) * raw_noise_std
+
+
+    alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
+    # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
+
+    
+    weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
+    rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
+
+    depth_map = torch.sum(weights, -1) 
+    disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
+    acc_map = torch.sum(weights, -1)
+
+    if white_bkgd:
+        rgb_map = rgb_map + (1.-acc_map[...,None])
+
+    return rgb_map, disp_map, acc_map, weights, depth_map
 
 
 def render_rays(vertices, 
@@ -540,7 +555,14 @@ def render_rays(vertices,
     rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each
     viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 8 else None
     
-    out = find_intersection_points_with_mesh(vertices, faces, rays_o, rays_d, False)
+    print(f'Vertices requires_grad: {vertices.requires_grad}')
+    print(f'Faces requires_grad: {faces.requires_grad}')
+    
+    out = find_intersection_points_with_mesh(vertices, faces, rays_o, rays_d)
+
+
+    print(f'Vertices requires_grad after out: {vertices.requires_grad}')
+    print(f'Faces requires_grad after out: {faces.requires_grad}')
 
     # Uzyskanie punktów przecięcia w formie: [liczba promieni, maksymalna liczba punktów przecięcia, 3]
     valid_indices = out['valid_point'].nonzero(as_tuple=True)
@@ -576,11 +598,12 @@ def render_rays(vertices,
 
     
     pts = output_matrix
-    z_vals = torch.norm(output_matrix - rays_o.unsqueeze(1), dim=-1)
+    # z_vals = torch.norm(output_matrix - rays_o.unsqueeze(1), dim=-1)
     # print("Z_vals: ", z_vals.shape)
-
+    print(f'Vertices requires_grad after pts: {vertices.requires_grad}')
+    print(f'Faces requires_grad after pts: {faces.requires_grad}')
     raw = network_query_fn(pts, viewdirs, network_fn)
-    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, output_matrix, vertices, faces, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
 
     ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map}
@@ -703,8 +726,8 @@ def train():
         time0 = time.time()
         model.train()
 
-        # print(f'Vertices requires_grad: {model.vertices.requires_grad}')
-        # print(f'Faces requires_grad: {model.faces.requires_grad}')
+        print(f'Vertices requires_grad start train: {model.vertices.requires_grad}')
+        print(f'Faces requires_grad start train: {model.faces.requires_grad}')
 
         # Sample random ray batch
         if use_batching:
