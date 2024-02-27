@@ -20,7 +20,7 @@ class Triangle:
                    (self.v0 == other.v2 and self.v1 == other.v0 and self.v2 == other.v1)
 
     def get_vertices(self):
-        return self.vertices
+        return [self.v0, self.v1, self.v2]
 
     def get_vertices_tensor(self):
         return [torch.tensor([self.v0.x, self.v0.y, self.v0.z], dtype=torch.float32),

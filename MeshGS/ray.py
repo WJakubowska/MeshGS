@@ -1,33 +1,17 @@
-# from ray_tracing.rays import Rays
-# from ray_tracing.mesh import Mesh
 import torch
 import numpy as np
 import plotly.graph_objects as go
 
-import plotly.graph_objects as go
 import plotly.io as pio
 from pathlib import Path
 
-from torch.optim import Adam
 
 class Rays:
-    """Lines in 3D space, each has an origin point and a direction vector."""
-
     def __init__(
             self,
             origin: torch.Tensor,
             direction: torch.Tensor
     ):
-        """Initialize lines with origin points and direction vectors.
-
-        Each line has a corresponding origin point and a direction vector.
-        Args:
-            origin: torch.Tensor with shape (N, 3),
-             where N is the number of lines, and 3 corresponds to
-             a set of three coordinates defining a point in 3D space.
-            direction: torch.Tensor with shape (N, 3).
-
-        """
         self.origin = origin
         self.direction = direction
 
@@ -41,8 +25,8 @@ class Rays:
         vertices: torch.Tensor,
         faces: torch.Tensor
     ):
-        print(f'Vertices requires_grad in ray: {vertices.requires_grad}')
-        print(f'Faces requires_grad in ray: {faces.requires_grad}')
+        # print(f'Vertices requires_grad in ray: {vertices.requires_grad}')
+        # print(f'Faces requires_grad in ray: {faces.requires_grad}')
 
         triangle_vertices = vertices[faces]
 
@@ -139,8 +123,8 @@ def find_intersection_points_with_mesh(vertices, faces, rays_o, rays_d):
         direction=rays_d,
     )
 
-    print(f'Vertices requires_grad in find: {vertices.requires_grad}')
-    print(f'Faces requires_grad in find: {faces.requires_grad}')
+    # print(f'Vertices requires_grad in find: {vertices.requires_grad}')
+    # print(f'Faces requires_grad in find: {faces.requires_grad}')
     
 
     out = rays.find_intersection_points_with_mesh(
@@ -148,93 +132,4 @@ def find_intersection_points_with_mesh(vertices, faces, rays_o, rays_d):
         faces=faces.long()
     )
 
-    print(f'Vertices requires_grad in find 2: {vertices.requires_grad}')
-    print(f'Faces requires_grad in find 2: {faces.requires_grad}')
-    
-
     return out
-
-
-# vertices = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], requires_grad=True)
-# faces = torch.tensor([[0, 1, 2]], requires_grad=False)
-# target_point = torch.tensor([0.5, 0.5, 0.0] , requires_grad=True) 
-# target_face = faces[0]
-
-# num_rays = 100
-# ray_origins = torch.rand(num_rays, 3 , requires_grad=False)
-# ray_directions = torch.tensor([[0.0, 0.0, 1.0]], requires_grad=False).repeat(num_rays, 1)
-
-# rays = Rays(ray_origins, ray_directions)
-# optimizer = Adam([target_point], lr=0.1)
-
-# for i in range(100):
-#     optimizer.zero_grad()
-#     pts = rays.find_intersection_points_with_mesh(vertices, faces)
-#     distances = torch.norm(pts['pts_nearest_each_ray'] - target_point, dim=1)
-#     loss = torch.mean(distances)
-#     loss.backward()
-#     optimizer.step() 
-#     print(f"Iteration {i+1}, Loss: {loss.item()}")
-# print("Optimal point:", target_point)
-
-
-# class RayTracer:
-#     def __init__(self, rays_o, rays_d):
-#         self.rays_o = rays_o
-#         self.rays_d = rays_d
-
-#     def find_intersection_points_with_mesh(self, vertices, faces):
-#         faces = faces.long()
-    
-#         A = vertices[faces[:, 0]] 
-#         B = vertices[faces[:, 1]] 
-#         C = vertices[faces[:, 2]]  
-
-
-#         AB = B - A
-#         AC = C - A
-#         face_normals = torch.cross(AB, AC)
-
-  
-#         denom = torch.sum(face_normals.unsqueeze(0) * self.rays_d.unsqueeze(1), dim=-1)
-
-
-#         valid_ray_mask = torch.abs(denom) > 1e-6
-
-#         AO = A.unsqueeze(0) - self.rays_o.unsqueeze(1)
-#         t = torch.sum(AO.unsqueeze(2) * face_normals.unsqueeze(0), dim=-1) / denom.unsqueeze(1)
-#         t[~valid_ray_mask] = float('inf')
-#         min_t, min_idx = torch.min(t, dim=1)
-#         intersection_points = self.rays_o.unsqueeze(1) + min_t.unsqueeze(2) * self.rays_d.unsqueeze(1)
-
-
-#         fig = go.Figure(data=[
-#             go.Scatter3d(
-#                 x=intersection_points.detach().numpy()[:, :, 0].flatten(),
-#                 y=intersection_points.detach().numpy()[:, :, 1].flatten(),
-#                 z=intersection_points.detach().numpy()[:, :, 2].flatten(),
-#                 mode='markers',
-#                 marker=dict(
-#                     size=5,
-#                     color='blue',
-#                     opacity=0.8
-#                 )
-#             )
-#         ])
-#         fig.update_layout(scene=dict(
-#             xaxis_title='X',
-#             yaxis_title='Y',
-#             zaxis_title='Z'
-#         ))
-#         dir = 'images'
-#         Path(dir).mkdir(parents=True, exist_ok=True)
-#         name = "points.html"
-#         fig.write_html(
-#             f'{dir}/{name}', auto_open=True
-#         )
-
-
-#         print("SHAAAAAAAAPE: ", intersection_points.shape)
-#         print(intersection_points)
-#         return intersection_points
-

@@ -146,7 +146,6 @@ def batchify(fn, chunk):
     if chunk is None:
         return fn
     def ret(inputs):
-        print("Typy: ", inputs.float().dtype)
         return torch.cat([fn(inputs.float()[i:i+chunk]) for i in range(0, inputs.float().shape[0], chunk)], 0)
     return ret
 
@@ -291,8 +290,23 @@ def render_path(vertices, faces, i_iter,  render_poses, hwf, K, chunk, render_kw
 
     return rgbs, disps
 
+def create_icosphere(center_point, radius, n_subdivisions):
+    icosphere = Icosphere(n_subdivisions, center_point, radius)
+    vertices, triangles = icosphere.vertices, icosphere.triangles
+    unique_triangles = get_unique_triangles(triangles)
+    unique_vertices = icosphere.get_all_vertices()
+    result_triangles = get_triangles_as_indices(unique_vertices, triangles)
+    faces, features_dc, features_rest, opacity, vertices = setup_training_input(unique_vertices, result_triangles)
+    return faces, vertices
 
-def create_nerf(args):
+def create_sphere():
+    vertices, triangles = create_sphere_mesh(2, 20)
+    result_triangles = get_triangles_as_indices(vertices, triangles)
+    faces, features_dc, features_rest, opacity, vertices = setup_training_input(vertices, result_triangles)
+    return faces, vertices
+
+
+def create_nerf(args, icosphere = True):
     """Instantiate NeRF's MLP model.
     """
     embed_fn, input_ch = get_embedder(args.multires, args.i_embed)
@@ -304,28 +318,22 @@ def create_nerf(args):
     output_ch = 4
     skips = [4]
 
-    center_point = (0, 0, 0)
-    radius = [2, 1]
-    n_subdivisions = 2
-    icosphere = Icosphere(n_subdivisions, center_point, radius)
-    vertices, triangles = icosphere.vertices, icosphere.triangles
-    unique_triangles = get_unique_triangles(triangles)
-    unique_vertices = icosphere.get_all_vertices()
-    result_triangles = get_triangles_as_indices(unique_vertices, triangles)
-    faces, features_dc, features_rest, opacity, vertices = setup_training_input(unique_vertices, result_triangles)
+    faces, vertices = None, None
 
-    # vertices, triangles = create_sphere_mesh(2, 20)
-    # result_triangles = get_triangles_as_indices(vertices, triangles)
-    # faces, features_dc, features_rest, opacity, vertices = setup_training_input(vertices, result_triangles)
+    if icosphere == True:
+        center_point = (0, 0, 0)
+        radius = [2, 1]
+        n_subdivisions = 2
+        faces, vertices = create_icosphere(center_point, radius, n_subdivisions)
+    else:  
+        faces, vertices = create_sphere()
+
 
     model = NeRF(D=args.netdepth, W=args.netwidth,
                  input_ch=input_ch, output_ch=output_ch, skips=skips,
                  input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
     model.vertices = nn.Parameter(vertices, requires_grad =True)
     model.faces = nn.Parameter(faces.float(), requires_grad=False)
-
-    # print(f'Vertices requires_grad: {model.vertices.requires_grad}')
-    # print(f'Faces requires_grad: {model.faces.requires_grad}')
 
     grad_vars = list(model.parameters())
 
@@ -339,17 +347,6 @@ def create_nerf(args):
     # Create optimizer
     optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
 
-    # for name, param in model.named_parameters():
-    #     print(name)
-
-    # for key in optimizer.state_dict().keys():
-    #     print(key)
-
-    # for param in optimizer.param_groups[0]['params']:
-    #     print(param)
-
-
-
     start = 0
     basedir = args.basedir
     expname = args.expname
@@ -361,20 +358,6 @@ def create_nerf(args):
         ckpts = [args.ft_path]
     else:
         ckpts = [os.path.join(basedir, expname, f) for f in sorted(os.listdir(os.path.join(basedir, expname))) if 'tar' in f]
-
-    print('Found ckpts', ckpts)
-    if len(ckpts) > 0 and not args.no_reload:
-        ckpt_path = ckpts[-1]
-        print('Reloading from', ckpt_path)
-        ckpt = torch.load(ckpt_path)
-
-        start = ckpt['global_step']
-        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-
-        # Load model
-        model.load_state_dict(ckpt['network_fn_state_dict'])
-        if model_fine is not None:
-            model_fine.load_state_dict(ckpt['network_fine_state_dict'])
 
     ##########################
 
@@ -401,50 +384,57 @@ def create_nerf(args):
     return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer, model
 
 
-# def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
-#     """Transforms model's predictions to semantically meaningful values.
-#     Args:
-#         raw: [num_rays, num_samples along ray, 4]. Prediction from model.
-#         z_vals: [num_rays, num_samples along ray]. Integration time.
-#         rays_d: [num_rays, 3]. Direction of each ray.
-#     Returns:
-#         rgb_map: [num_rays, 3]. Estimated RGB color of a ray.
-#         disp_map: [num_rays]. Disparity map. Inverse of depth map.
-#         acc_map: [num_rays]. Sum of weights along each ray.
-#         weights: [num_rays, num_samples]. Weights assigned to each sampled color.
-#         depth_map: [num_rays]. Estimated distance to object.
-#     """
-#     raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
+def calculate_barycentric_coordinates(point, vertex_A, vertex_B, vertex_C):
+    # https://ceng2.ktu.edu.tr/~cakir/files/grafikler/Texture_Mapping.pdf
+    v0 = vertex_B - vertex_A
+    v1 = vertex_C - vertex_A
+    v2 = point - vertex_A
 
-#     dists = z_vals[...,1:] - z_vals[...,:-1]
-#     dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
+    d00 = torch.dot(v0, v0) # torch.dot() - iloczyn skalarny
+    d01 = torch.dot(v0, v1)
+    d11 = torch.dot(v1, v1)
+    d20 = torch.dot(v2, v0)
+    d21 = torch.dot(v2, v1)
+    denom = d00 * d11 - d01 * d01
 
-#     dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
+    v = (d11 * d20 - d01 * d21) / denom
+    w = (d00 * d21 - d01 * d20) / denom
+    u = 1.0 - v - w
 
-#     rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
-#     noise = 0.
-#     if raw_noise_std > 0.:
-#         noise = torch.randn(raw[...,3].shape) * raw_noise_std
+    return u, v, w
 
-#         # Overwrite randomly sampled data if pytest
-#         if pytest:
-#             np.random.seed(0)
-#             noise = np.random.rand(*list(raw[...,3].shape)) * raw_noise_std
-#             noise = torch.Tensor(noise)
+def check_if_point_is_in_triangle(point, vertex_A, vertex_B, vertex_C):
+    u, v, w = calculate_barycentric_coordinates(point, vertex_A, vertex_B, vertex_C)
 
-#     alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
-#     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
-#     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
-#     rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
+    if 0 <= v <= 1 and 0 <= w <= 1 and 0 <= u <= 1 :
+        return (u, v, w) 
+    
+    return False
 
-#     depth_map = torch.sum(weights * z_vals, -1)
-#     disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
-#     acc_map = torch.sum(weights, -1)
 
-#     if white_bkgd:
-#         rgb_map = rgb_map + (1.-acc_map[...,None])
+def find_barycentric_coordinates(points, vertices, faces):
+    N_rays, N_samples, _ = points.shape
+    coords = torch.zeros((N_rays, N_samples, 3))
 
-#     return rgb_map, disp_map, acc_map, weights, depth_map
+    for i in range(N_rays):
+        for j in range(N_samples):
+            point = points[i, j]
+            found_triangle = False
+            for triangle in faces:
+                A_idx, B_idx, C_idx = triangle
+                A, B, C = vertices[A_idx], vertices[B_idx], vertices[C_idx]
+                coordinate = check_if_point_is_in_triangle(point, A, B, C)
+                if coordinate is not False:
+                    u, v, w = coordinate
+                    coords[i, j] = u * A + v * B + w * C
+                    found_triangle = True
+                    break;   
+            else:
+                assert found_triangle, "Triangle not found for point"
+
+    return coords
+
+
 
 
 def raw2outputs(raw, output_matrix, vertices, faces, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
@@ -461,32 +451,23 @@ def raw2outputs(raw, output_matrix, vertices, faces, rays_d, raw_noise_std=0, wh
         depth_map: [num_rays]. Estimated distance to object.
     """
     faces = faces.long()
-    print(f'Vertices requires_grad in raw2outputs: {vertices.requires_grad}')
-    print(f'Faces requires_grad  in raw2outputs: {faces.requires_grad}')
-
     raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
-
     num_rays, num_samples = raw.shape[:2]
 
     # z_vals = torch.rand((num_rays, num_samples + 1))
     # dists = z_vals[...,1:] - z_vals[...,:-1]
     # dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
     # dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
-
     # dists = torch.ones_like(torch.randn((num_rays, num_samples)))
 
-    # _rays_d = rays_d[:, None, :].repeat(1, num_samples, 1)
-    # dists = torch.norm(output_matrix - _rays_d, dim=-1)
-    
-        # Calculate distances between output_matrix and vertices
-    _vertices = vertices.unsqueeze(0).unsqueeze(1)  # [1, 1, num_vertices, 3]
-    _output_matrix = output_matrix.unsqueeze(2)  # [num_rays, num_samples, 1, 3]
-    dists = torch.norm(_output_matrix - _vertices, dim=-1)  # [num_rays, num_samples, num_vertices]
-
-    # Find minimum distances along vertices
-    dists = torch.min(dists, dim=-1)[0]  # [num_rays, num_samples]
-    # print("Sahpe: ", output_matrix.shape, vertices.shape, faces.shape, rays_d.shape)
-
+    coords = find_barycentric_coordinates(output_matrix, vertices, faces)
+    differences = torch.diff(coords, dim=1)
+    z_vals = torch.norm(differences, dim=2)
+    dists = z_vals[...,1:] - z_vals[...,:-1]
+    dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)
+    dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
+    dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
+    print("Dists 3: ", dists.shape)
 
     rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
     noise = 0.
@@ -509,6 +490,9 @@ def raw2outputs(raw, output_matrix, vertices, faces, rays_d, raw_noise_std=0, wh
         rgb_map = rgb_map + (1.-acc_map[...,None])
 
     return rgb_map, disp_map, acc_map, weights, depth_map
+
+
+
 
 
 def render_rays(vertices, 
@@ -555,14 +539,14 @@ def render_rays(vertices,
     rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each
     viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 8 else None
     
-    print(f'Vertices requires_grad: {vertices.requires_grad}')
-    print(f'Faces requires_grad: {faces.requires_grad}')
+    # print(f'Vertices requires_grad: {vertices.requires_grad}')
+    # print(f'Faces requires_grad: {faces.requires_grad}')
     
     out = find_intersection_points_with_mesh(vertices, faces, rays_o, rays_d)
 
 
-    print(f'Vertices requires_grad after out: {vertices.requires_grad}')
-    print(f'Faces requires_grad after out: {faces.requires_grad}')
+    # print(f'Vertices requires_grad after out: {vertices.requires_grad}')
+    # print(f'Faces requires_grad after out: {faces.requires_grad}')
 
     # Uzyskanie punktów przecięcia w formie: [liczba promieni, maksymalna liczba punktów przecięcia, 3]
     valid_indices = out['valid_point'].nonzero(as_tuple=True)
@@ -582,26 +566,15 @@ def render_rays(vertices,
     output_matrix = torch.zeros((rays_d.shape[0], num_nonzero_points, 3), dtype=torch.float64)
     output_matrix[:, :num_nonzero_points, :] = sorted_matrix[:, :num_nonzero_points, :]
 
-    # if i_iter%100 == 0:
-        # plot_selected_points_on_sphere(output_matrix, vertices, faces, 'sphere_faces_required_grad' + str(i_iter)+ '.html')
+    if i_iter%100 == 0:
+        plot_selected_points_on_sphere(output_matrix, vertices, faces, 'vertices_grad' + str(i_iter)+ '.html')
     
     # plot_selected_points_on_sphere(output_matrix, vertices, faces, 'przed_dodaniem_rozkładu.html')
     
-    ### GAUSS ###############################################
-    # N_rays, N_samples, _ = output_matrix.shape
-    # pts_gauss = np.random.normal(0, 0.1, (N_rays, N_samples, 3))
-    # pts_gauss1 = np.random.normal(0, 0.1, (N_rays, N_samples, 3))
-    # pts_gauss2 = np.random.normal(0, 0.1, (N_rays, N_samples, 3))
-    # output_matrix = np.concatenate((output_matrix.cpu(), pts_gauss, pts_gauss1, pts_gauss2, pts_gauss, pts_gauss1, pts_gauss2, pts_gauss1, pts_gauss1, pts_gauss1), axis=1)
-    # print("Rozmair output:", output_matrix.shape)
-    # output_matrix = torch.Tensor(output_matrix)
-
-    
     pts = output_matrix
-    # z_vals = torch.norm(output_matrix - rays_o.unsqueeze(1), dim=-1)
-    # print("Z_vals: ", z_vals.shape)
-    print(f'Vertices requires_grad after pts: {vertices.requires_grad}')
-    print(f'Faces requires_grad after pts: {faces.requires_grad}')
+
+    # print(f'Vertices requires_grad after pts: {vertices.requires_grad}')
+    # print(f'Faces requires_grad after pts: {faces.requires_grad}')
     raw = network_query_fn(pts, viewdirs, network_fn)
     rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, output_matrix, vertices, faces, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
@@ -671,7 +644,7 @@ def train():
             file.write(open(args.config, 'r').read())
 
     # Create nerf model
-    render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer, model = create_nerf(args)
+    render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer, model = create_nerf(args, icosphere = True)
     global_step = start
 
     bds_dict = {
@@ -726,8 +699,8 @@ def train():
         time0 = time.time()
         model.train()
 
-        print(f'Vertices requires_grad start train: {model.vertices.requires_grad}')
-        print(f'Faces requires_grad start train: {model.faces.requires_grad}')
+        # print(f'Vertices requires_grad start train: {model.vertices.requires_grad}')
+        # print(f'Faces requires_grad start train: {model.faces.requires_grad}')
 
         # Sample random ray batch
         if use_batching:
@@ -822,7 +795,7 @@ def train():
                     print(f'  ZMIAAAANAAAAAAAAAAAAAAAAAAAAAAAA Parametr {name} zmienił wartość po aktualizacji:')
                     # print(f'Wartość przed aktualizacją: {prev_value}')
                     # print(f'Nowa wartość po aktualizacji: {param}')
-                    # print(f'Gradient parametru po aktualizacji: {param.grad}')
+                    print(f'Gradient parametru po aktualizacji: {param.grad}')
                 prev_param_values[name] = param.clone().detach()
 
         # NOTE: IMPORTANT!
