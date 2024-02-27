@@ -384,56 +384,73 @@ def create_nerf(args, icosphere = True):
     return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer, model
 
 
-def calculate_barycentric_coordinates(point, vertex_A, vertex_B, vertex_C):
+def calculate_barycentric_coordinates(point, vertices_A, vertices_B, vertices_C):
     # https://ceng2.ktu.edu.tr/~cakir/files/grafikler/Texture_Mapping.pdf
-    v0 = vertex_B - vertex_A
-    v1 = vertex_C - vertex_A
-    v2 = point - vertex_A
+        v0 = vertices_B - vertices_A
+        v1 = vertices_C - vertices_A
+        v2 = point - vertices_A
+        
+        d00 = torch.sum(v0 * v0, dim=1) # torch.dot() - iloczyn skalarny
+        d01 = torch.sum(v0 * v1, dim=1) # (X*Y).sum(axis = 1) == torch.tensor([torch.dot(X[0], Y[0]),torch.dot(X[1], Y[1])])
+        d11 = torch.sum(v1 * v1, dim=1)
+        d20 = torch.sum(v2 * v0, dim=1)
+        d21 = torch.sum(v2 * v1, dim=1)
+        denom = d00 * d11 - d01 * d01
+        v = (d11 * d20 - d01 * d21) / denom
+        w = (d00 * d21 - d01 * d20) / denom
+        u = 1.0 - v - w
+        return u, v, w
 
-    d00 = torch.dot(v0, v0) # torch.dot() - iloczyn skalarny
-    d01 = torch.dot(v0, v1)
-    d11 = torch.dot(v1, v1)
-    d20 = torch.dot(v2, v0)
-    d21 = torch.dot(v2, v1)
-    denom = d00 * d11 - d01 * d01
-
-    v = (d11 * d20 - d01 * d21) / denom
-    w = (d00 * d21 - d01 * d20) / denom
-    u = 1.0 - v - w
-
-    return u, v, w
-
-def check_if_point_is_in_triangle(point, vertex_A, vertex_B, vertex_C):
-    u, v, w = calculate_barycentric_coordinates(point, vertex_A, vertex_B, vertex_C)
-
-    if 0 <= v <= 1 and 0 <= w <= 1 and 0 <= u <= 1 :
-        return (u, v, w) 
+def check_if_point_is_in_triangle(point, vertices_A, vertices_B, vertices_C):
+    u, v, w = calculate_barycentric_coordinates(point, vertices_A, vertices_B, vertices_C)
+    mask = (v >= 0) & (w >= 0) & (u >= 0)
+    if mask.any():
+        idx = torch.nonzero(mask)[0]
+        return u[idx] *  vertices_A[idx] + v[idx] * vertices_B[idx] + w[idx] * vertices_C[idx]
     
     return False
 
 
-def find_barycentric_coordinates(points, vertices, faces):
+# def find_barycentric_coordinates(points, vertices, faces):
+#     N_rays, N_samples, _ = points.shape
+#     coords = torch.zeros((N_rays, N_samples, 3))
+
+#     for i in range(N_rays):
+#         for j in range(N_samples):
+#             point = points[i, j]
+#             found_triangle = False
+#             for triangle in faces:
+#                 A_idx, B_idx, C_idx = triangle
+#                 A, B, C = vertices[A_idx], vertices[B_idx], vertices[C_idx]
+#                 coordinate = check_if_point_is_in_triangle(point, A, B, C)
+#                 if coordinate is not False:
+#                     u, v, w = coordinate
+#                     coords[i, j] = u * A + v * B + w * C
+#                     found_triangle = True
+#                     break;   
+#             else:
+#                 assert found_triangle, "Triangle not found for point"
+
+#     return coords
+
+
+def find_barycentric_coordinates_1(points, vertices, faces):
     N_rays, N_samples, _ = points.shape
     coords = torch.zeros((N_rays, N_samples, 3))
 
     for i in range(N_rays):
         for j in range(N_samples):
             point = points[i, j]
-            found_triangle = False
-            for triangle in faces:
-                A_idx, B_idx, C_idx = triangle
-                A, B, C = vertices[A_idx], vertices[B_idx], vertices[C_idx]
-                coordinate = check_if_point_is_in_triangle(point, A, B, C)
-                if coordinate is not False:
-                    u, v, w = coordinate
-                    coords[i, j] = u * A + v * B + w * C
-                    found_triangle = True
-                    break;   
+            A = vertices[faces[:, 0]]
+            B = vertices[faces[:, 1]]
+            C = vertices[faces[:, 2]]
+            coordinate = check_if_point_is_in_triangle(point, A, B, C)
+            if coordinate is not False:
+                coords[i, j] = coordinate
             else:
-                assert found_triangle, "Triangle not found for point"
+                assert False, "Triangle not found for point"
 
     return coords
-
 
 
 
@@ -462,12 +479,11 @@ def raw2outputs(raw, output_matrix, vertices, faces, rays_d, raw_noise_std=0, wh
 
     coords = find_barycentric_coordinates(output_matrix, vertices, faces)
     differences = torch.diff(coords, dim=1)
-    z_vals = torch.norm(differences, dim=2)
-    dists = z_vals[...,1:] - z_vals[...,:-1]
-    dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)
+    dists = torch.norm(differences, dim=2)
+    # dists = z_vals[...,1:] - z_vals[...,:-1]
+    # dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)
     dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
     dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
-    print("Dists 3: ", dists.shape)
 
     rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
     noise = 0.
@@ -539,14 +555,7 @@ def render_rays(vertices,
     rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each
     viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 8 else None
     
-    # print(f'Vertices requires_grad: {vertices.requires_grad}')
-    # print(f'Faces requires_grad: {faces.requires_grad}')
-    
     out = find_intersection_points_with_mesh(vertices, faces, rays_o, rays_d)
-
-
-    # print(f'Vertices requires_grad after out: {vertices.requires_grad}')
-    # print(f'Faces requires_grad after out: {faces.requires_grad}')
 
     # Uzyskanie punktów przecięcia w formie: [liczba promieni, maksymalna liczba punktów przecięcia, 3]
     valid_indices = out['valid_point'].nonzero(as_tuple=True)
@@ -569,12 +578,9 @@ def render_rays(vertices,
     if i_iter%100 == 0:
         plot_selected_points_on_sphere(output_matrix, vertices, faces, 'vertices_grad' + str(i_iter)+ '.html')
     
-    # plot_selected_points_on_sphere(output_matrix, vertices, faces, 'przed_dodaniem_rozkładu.html')
-    
+ 
     pts = output_matrix
 
-    # print(f'Vertices requires_grad after pts: {vertices.requires_grad}')
-    # print(f'Faces requires_grad after pts: {faces.requires_grad}')
     raw = network_query_fn(pts, viewdirs, network_fn)
     rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, output_matrix, vertices, faces, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
@@ -699,8 +705,6 @@ def train():
         time0 = time.time()
         model.train()
 
-        # print(f'Vertices requires_grad start train: {model.vertices.requires_grad}')
-        # print(f'Faces requires_grad start train: {model.faces.requires_grad}')
 
         # Sample random ray batch
         if use_batching:
@@ -769,22 +773,10 @@ def train():
             loss = loss + img_loss0
             psnr0 = mse2psnr(img_loss0)
 
-        # for param in model.parameters():
-        #     print(param.grad)
-     
-
-        # print("Before loss.backward()")    
-        # for name, param in model.named_parameters():
-        #     if 'vertices' in name or 'faces' in name:
-        #         print(f'Parameter name: {name}, Gradient: {param}')
         
         loss.backward()
         optimizer.step()
 
-        # print("After loss.backward()")    
-        # for name, param in model.named_parameters():
-        #     if 'vertices' in name or 'faces' in name:
-        #         print(f'Parameter name: {name}, Gradient: {param}')
         
         for name, param in model.named_parameters():
             if 'vertices' in name or 'faces' in name:
@@ -795,7 +787,7 @@ def train():
                     print(f'  ZMIAAAANAAAAAAAAAAAAAAAAAAAAAAAA Parametr {name} zmienił wartość po aktualizacji:')
                     # print(f'Wartość przed aktualizacją: {prev_value}')
                     # print(f'Nowa wartość po aktualizacji: {param}')
-                    print(f'Gradient parametru po aktualizacji: {param.grad}')
+                    # print(f'Gradient parametru po aktualizacji: {param.grad}')
                 prev_param_values[name] = param.clone().detach()
 
         # NOTE: IMPORTANT!
