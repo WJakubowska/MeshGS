@@ -124,7 +124,7 @@ def config_parser():
                         help='frequency of console printout and metric loggin')
     parser.add_argument("--i_img",     type=int, default=500, 
                         help='frequency of tensorboard image logging')
-    parser.add_argument("--i_video",   type=int, default=3000, 
+    parser.add_argument("--i_video",   type=int, default=1000, 
                         help='frequency of render_poses video saving')
 
     return parser
@@ -434,7 +434,7 @@ def check_if_point_is_in_triangle(point, vertices_A, vertices_B, vertices_C):
 #     return coords
 
 
-def find_barycentric_coordinates_1(points, vertices, faces):
+def find_barycentric_coordinates(points, vertices, faces):
     N_rays, N_samples, _ = points.shape
     coords = torch.zeros((N_rays, N_samples, 3))
 
@@ -779,7 +779,7 @@ def train():
 
         
         for name, param in model.named_parameters():
-            if 'vertices' in name or 'faces' in name:
+            if 'vertices' in name:
                 prev_value = prev_param_values.get(name)
                 if prev_value is not None and torch.equal(prev_value, param):
                     print(f'Parametr {name} nie zmienił wartości po aktualizacji.')
