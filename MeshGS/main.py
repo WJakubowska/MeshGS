@@ -411,27 +411,6 @@ def check_if_point_is_in_triangle(point, vertices_A, vertices_B, vertices_C):
     return False
 
 
-# def find_barycentric_coordinates(points, vertices, faces):
-#     N_rays, N_samples, _ = points.shape
-#     coords = torch.zeros((N_rays, N_samples, 3))
-
-#     for i in range(N_rays):
-#         for j in range(N_samples):
-#             point = points[i, j]
-#             found_triangle = False
-#             for triangle in faces:
-#                 A_idx, B_idx, C_idx = triangle
-#                 A, B, C = vertices[A_idx], vertices[B_idx], vertices[C_idx]
-#                 coordinate = check_if_point_is_in_triangle(point, A, B, C)
-#                 if coordinate is not False:
-#                     u, v, w = coordinate
-#                     coords[i, j] = u * A + v * B + w * C
-#                     found_triangle = True
-#                     break;   
-#             else:
-#                 assert found_triangle, "Triangle not found for point"
-
-#     return coords
 
 
 def find_barycentric_coordinates(points, vertices, faces):
