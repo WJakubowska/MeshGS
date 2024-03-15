@@ -447,7 +447,8 @@ def raw2outputs(raw, output_matrix, vertices, faces, rays_d, raw_noise_std=0, wh
         depth_map: [num_rays]. Estimated distance to object.
     """
     faces = faces.long()
-    raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
+    # raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
+    raw2alpha = lambda raw, act_fn=F.sigmoid: act_fn(raw)
     num_rays, num_samples = raw.shape[:2]
 
     # z_vals = torch.rand((num_rays, num_samples + 1))
@@ -456,13 +457,13 @@ def raw2outputs(raw, output_matrix, vertices, faces, rays_d, raw_noise_std=0, wh
     # dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
     # dists = torch.ones_like(torch.randn((num_rays, num_samples)))
 
-    coords = find_barycentric_coordinates(output_matrix, vertices, faces)
-    differences = torch.diff(coords, dim=1)
-    dists = torch.norm(differences, dim=2)
-    # dists = z_vals[...,1:] - z_vals[...,:-1]
-    # dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)
-    dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
-    dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
+    # coords = find_barycentric_coordinates(output_matrix, vertices, faces)
+    # differences = torch.diff(coords, dim=1)
+    # dists = torch.norm(differences, dim=2)
+    # # dists = z_vals[...,1:] - z_vals[...,:-1]
+    # # dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)
+    # dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
+    # dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
 
     rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
     noise = 0.
@@ -470,7 +471,10 @@ def raw2outputs(raw, output_matrix, vertices, faces, rays_d, raw_noise_std=0, wh
         noise = torch.randn(raw[...,3].shape) * raw_noise_std
 
 
-    alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
+    # alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
+    alpha = raw2alpha(raw[...,3] + noise)
+    # print("Alpha: ",  alpha.shape)
+
     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
 
     
