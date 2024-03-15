@@ -432,6 +432,19 @@ def find_barycentric_coordinates(points, vertices, faces):
     return coords
 
 
+    # z_vals = torch.rand((num_rays, num_samples + 1))
+    # dists = z_vals[...,1:] - z_vals[...,:-1]
+    # dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
+    # dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
+    # dists = torch.ones_like(torch.randn((num_rays, num_samples)))
+
+    # coords = find_barycentric_coordinates(output_matrix, vertices, faces)
+    # differences = torch.diff(coords, dim=1)
+    # dists = torch.norm(differences, dim=2)
+    # # dists = z_vals[...,1:] - z_vals[...,:-1]
+    # # dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)
+    # dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
+    # dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
 
 def raw2outputs(raw, output_matrix, vertices, faces, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
     """Transforms model's predictions to semantically meaningful values.
@@ -451,19 +464,6 @@ def raw2outputs(raw, output_matrix, vertices, faces, rays_d, raw_noise_std=0, wh
     raw2alpha = lambda raw, act_fn=F.sigmoid: act_fn(raw)
     num_rays, num_samples = raw.shape[:2]
 
-    # z_vals = torch.rand((num_rays, num_samples + 1))
-    # dists = z_vals[...,1:] - z_vals[...,:-1]
-    # dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
-    # dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
-    # dists = torch.ones_like(torch.randn((num_rays, num_samples)))
-
-    # coords = find_barycentric_coordinates(output_matrix, vertices, faces)
-    # differences = torch.diff(coords, dim=1)
-    # dists = torch.norm(differences, dim=2)
-    # # dists = z_vals[...,1:] - z_vals[...,:-1]
-    # # dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)
-    # dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
-    # dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
 
     rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
     noise = 0.
@@ -558,11 +558,11 @@ def render_rays(vertices,
     output_matrix = torch.zeros((rays_d.shape[0], num_nonzero_points, 3), dtype=torch.float64)
     output_matrix[:, :num_nonzero_points, :] = sorted_matrix[:, :num_nonzero_points, :]
 
-    if i_iter%100 == 0:
+    if i_iter%1000 == 0:
         plot_selected_points_on_sphere(output_matrix, vertices, faces, 'vertices_grad' + str(i_iter)+ '.html')
-    
- 
-    pts = output_matrix
+    faces = faces.long()
+    coords = find_barycentric_coordinates(output_matrix, vertices, faces)
+    pts = coords
 
     raw = network_query_fn(pts, viewdirs, network_fn)
     rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, output_matrix, vertices, faces, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
