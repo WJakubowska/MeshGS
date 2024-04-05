@@ -137,8 +137,8 @@ def plot_rays_mesh_and_points(
 def plot_selected_points_on_sphere(selected_pts, vertices, triangles, name='selected_points.html'):
     fig = go.Figure()
 
-    vertices = vertices.detach().numpy()
-    triangles = triangles.detach().numpy().astype(int)
+    vertices = vertices.cpu().detach().numpy()
+    triangles = triangles.cpu().detach().numpy().astype(int)
     # print("vertices:", vertices)
     # print("triangles:", triangles)
     for triangle in triangles:
@@ -149,7 +149,7 @@ def plot_selected_points_on_sphere(selected_pts, vertices, triangles, name='sele
 
 
     for i in range(selected_pts.shape[0]):
-        x, y, z = zip(*selected_pts[i].detach().numpy())
+        x, y, z = zip(*selected_pts[i].cpu().detach().numpy())
         fig.add_trace(go.Scatter3d(x=x, y=y, z=z, mode='markers', name=f'Selected Points {i}', marker=dict(size=5, color='red'), showlegend=False))
 
     fig.update_layout(scene=dict(aspectmode="data"))

@@ -1,0 +1,19 @@
+expname = MeshGS_vertex_faces_as_param
+basedir = ./logs
+datadir = ./data/
+dataset_type = blender
+
+half_res = True
+no_batching = True
+
+lrate=5e-2
+icosphere=False
+coords=False
+points=2
+
+use_viewdirs = True
+
+white_bkgd = True
+
+N_rand = 1024
+
