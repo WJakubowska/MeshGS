@@ -3,7 +3,6 @@ class Vertex:
         self.x = x
         self.y = y
         self.z = z
-        # self.coordinates = (self.x, self.y, self.z)
         self.index = index
 
     def __str__(self):
