@@ -141,39 +141,39 @@ np.random.seed(0)
 DEBUG = False
 
 
-def batchify(fn, chunk):
-    """Constructs a version of 'fn' that applies to smaller batches.
-    """
-    if chunk is None:
-        return fn
-    def ret(inputs):
-        return torch.cat([fn(inputs.float()[i:i+chunk]) for i in range(0, inputs.float().shape[0], chunk)], 0)
-    return ret
+# def batchify(fn, chunk):
+#     """Constructs a version of 'fn' that applies to smaller batches.
+#     """
+#     if chunk is None:
+#         return fn
+#     def ret(inputs):
+#         return torch.cat([fn(inputs.float()[i:i+chunk]) for i in range(0, inputs.float().shape[0], chunk)], 0)
+#     return ret
 
 
-def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
-    """Prepares inputs and applies network 'fn'.
-    """
-    inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
-    embedded = embed_fn(inputs_flat)
+# def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
+#     """Prepares inputs and applies network 'fn'.
+#     """
+#     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
+#     embedded = embed_fn(inputs_flat)
 
-    if viewdirs is not None:
-        input_dirs = viewdirs[:,None].expand(inputs.shape)
-        input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
-        embedded_dirs = embeddirs_fn(input_dirs_flat)
-        embedded = torch.cat([embedded, embedded_dirs], -1)
+#     if viewdirs is not None:
+#         input_dirs = viewdirs[:,None].expand(inputs.shape)
+#         input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
+#         embedded_dirs = embeddirs_fn(input_dirs_flat)
+#         embedded = torch.cat([embedded, embedded_dirs], -1)
 
-    outputs_flat = batchify(fn, netchunk)(embedded)
-    outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
-    return outputs
+#     outputs_flat = batchify(fn, netchunk)(embedded)
+#     outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
+#     return outputs
 
 
-def batchify_rays(args, vertices, faces, i_iter,  rays_flat, chunk=1024*32, **kwargs):
+def batchify_rays(args, vertices, faces,  opacity, rgb_color, i_iter,  rays_flat, chunk=1024*32, **kwargs):
     """Render rays in smaller minibatches to avoid OOM.
     """
     all_ret = {}
     for i in range(0, rays_flat.shape[0], chunk):
-        ret = render_rays(args, vertices, faces, i_iter,  rays_flat[i:i+chunk], **kwargs)
+        ret = render_rays(args, vertices, faces,  opacity, rgb_color, i_iter,  rays_flat[i:i+chunk], **kwargs)
         for k in ret:
             if k not in all_ret:
                 all_ret[k] = []
@@ -183,7 +183,7 @@ def batchify_rays(args, vertices, faces, i_iter,  rays_flat, chunk=1024*32, **kw
     return all_ret
 
 
-def render(args, vertices, faces, i_iter,  H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
+def render(args, vertices, faces, opacity, rgb_color, i_iter,  H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
                   near=0., far=1.,
                   use_viewdirs=False, c2w_staticcam=None,
                   **kwargs):
@@ -212,11 +212,12 @@ def render(args, vertices, faces, i_iter,  H, W, K, chunk=1024*32, rays=None, c2
       acc_map: [batch_size]. Accumulated opacity (alpha) along a ray.
       extras: dict with everything returned by render_rays().
     """
-    print("NF:", near, far)
     if c2w is not None:
+        # print('pierwszy')
         # special case to render full image
         rays_o, rays_d = get_rays(H, W, K, c2w)
     else:
+        # print('drugi')
         # use provided ray batch
         rays_o, rays_d = rays
 
@@ -230,6 +231,7 @@ def render(args, vertices, faces, i_iter,  H, W, K, chunk=1024*32, rays=None, c2
         viewdirs = torch.reshape(viewdirs, [-1,3]).float()
 
     sh = rays_d.shape # [..., 3]
+    print("Sh: ", sh, " rays_d ", rays_d.shape)
     if ndc:
         # for forward facing scenes
         rays_o, rays_d = ndc_rays(H, W, K[0][0], 1., rays_o, rays_d)
@@ -244,9 +246,11 @@ def render(args, vertices, faces, i_iter,  H, W, K, chunk=1024*32, rays=None, c2
         rays = torch.cat([rays, viewdirs], -1)
 
     # Render and reshape
-    all_ret = batchify_rays(args, vertices, faces, i_iter, rays, chunk, **kwargs)
+    all_ret = batchify_rays(args, vertices, faces, opacity, rgb_color, i_iter, rays, chunk, **kwargs)
+    # print("Chunk, " , chunk, "all_ret", list(all_ret))
     for k in all_ret:
         k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
+        # print("k_sh ", len(k_sh))
         all_ret[k] = torch.reshape(all_ret[k], k_sh)
 
     k_extract = ['rgb_map', 'disp_map', 'acc_map']
@@ -255,7 +259,7 @@ def render(args, vertices, faces, i_iter,  H, W, K, chunk=1024*32, rays=None, c2
     return ret_list + [ret_dict]
 
 
-def render_path(args, vertices, faces, i_iter,  render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
+def render_path(args, vertices, faces, opacity, rgb_color, i_iter,  render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
 
     H, W, focal = hwf
 
@@ -270,10 +274,8 @@ def render_path(args, vertices, faces, i_iter,  render_poses, hwf, K, chunk, ren
 
     t = time.time()
     for i, c2w in enumerate(tqdm(render_poses)):
-        print("i", i)
-        print("Tu jestem:", i, time.time() - t)
-        t = time.time()
-        rgb, disp, acc, _ = render(args, vertices, faces, i_iter,  H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
+        rgb, disp, acc, _ = render(args, vertices, faces,  opacity, rgb_color, i_iter,  H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
+        # rgb, disp, acc, _ = render(args, vertices, faces,  opacity, rgb_color, i_iter,  H, W, K, chunk=chunk, c2w=None, **render_kwargs)
         rgbs.append(rgb.cpu().numpy())
         disps.append(disp.cpu().numpy())
         if i==0:
@@ -318,31 +320,32 @@ def create_nerf(args):
     skips = [4]
 
     faces, vertices = None, None
-    print("ico:", args.icosphere)
-    if args.icosphere == True:
-        center_point = (0, 0, 0)
-        radius = [2, 1]
-        n_subdivisions = 2
-        faces, vertices = create_icosphere(center_point, radius, n_subdivisions)
-    else:  
-        n_slices = 10
-        n_stacks = 10
-        vertices, triangles = uv_sphere(n_slices, n_stacks)
-        result_triangles = get_triangles_as_indices(vertices, triangles)
-        faces, features_dc, features_rest, opacity, vertices = setup_training_input(vertices, result_triangles)
+    # print("ico:", args.icosphere)
+    # if args.icosphere == True:
+    #     center_point = (0, 0, 0)
+    #     radius = [2, 1]
+    #     n_subdivisions = 2
+    #     faces, vertices = create_icosphere(center_point, radius, n_subdivisions)
+    # else:  
+    #     n_slices = 10
+    #     n_stacks = 10
+    #     vertices, triangles = uv_sphere(n_slices, n_stacks)
+    #     result_triangles = get_triangles_as_indices(vertices, triangles)
+    #     faces, features_dc, features_rest, opacity, vertices = setup_training_input(vertices, result_triangles)
+    model = MeshGS(N_rand = args.N_rand, N_sample = args.points,  mesh_icosphere = args.icosphere, use_viewdirs=args.use_viewdirs).to(device)
 
-    model = NeRF(D=args.netdepth, W=args.netwidth,
-                 input_ch=input_ch, output_ch=output_ch, skips=skips,
-                 input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
-    model.vertices = torch.nn.Parameter(vertices, requires_grad =True)
-    model.faces = torch.nn.Parameter(faces.float(), requires_grad=False)
+    # model = NeRF(D=args.netdepth, W=args.netwidth,
+    #              input_ch=input_ch, output_ch=output_ch, skips=skips,
+    #              input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
+    # model.vertices = torch.nn.Parameter(vertices, requires_grad =True)
+    # model.faces = torch.nn.Parameter(faces.float(), requires_grad=False)
 
     grad_vars = list(model.parameters())
     model_fine = None
-    network_query_fn = lambda inputs, viewdirs, network_fn : run_network(inputs, viewdirs, network_fn,
-                                                                embed_fn=embed_fn,
-                                                                embeddirs_fn=embeddirs_fn,
-                                                                netchunk=args.netchunk)
+    # network_query_fn = lambda inputs, viewdirs, network_fn : run_network(inputs, viewdirs, network_fn,
+    #                                                             embed_fn=embed_fn,
+    #                                                             embeddirs_fn=embeddirs_fn,
+    #                                                             netchunk=args.netchunk)
 
     # Create optimizer
     optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
@@ -362,7 +365,7 @@ def create_nerf(args):
     ##########################
 
     render_kwargs_train = {
-        'network_query_fn' : network_query_fn,
+        # 'network_query_fn' : network_query_fn,
         'perturb' : args.perturb,
         'network_fine' : model_fine,
         'network_fn' : model,
@@ -407,81 +410,38 @@ def check_if_point_is_in_triangle(point, vertices_A, vertices_B, vertices_C):
     mask = (v >= 0) & (w >= 0) & (u >= 0) & (v + w + u <= 1)
     if mask.any():
         idx = torch.nonzero(mask)[0]
-        return u[idx] *  vertices_A[idx] + v[idx] * vertices_B[idx] + w[idx] * vertices_C[idx]
+        return idx
+        # return u[idx] *  vertices_A[idx] + v[idx] * vertices_B[idx] + w[idx] * vertices_C[idx]
     
     return torch.empty(0)
 
 
-def find_barycentric_coordinates(points, vertices, faces):
+def find_barycentric_coordinates(points, vertices, faces, opacity, rgb_color):
     N_rays, N_samples, _ = points.shape
-    coords = []
+    opacity_tabs = []
+    rgb_tabs = []
     A = vertices[faces[:, 0]]
     B = vertices[faces[:, 1]]
     C = vertices[faces[:, 2]]
     points = points.view(-1, 3)
     for point in points:
-            coordinate = check_if_point_is_in_triangle(point, A, B, C)
-            if coordinate is not torch.empty(0):
-                coords.append(coordinate)
+            idx = check_if_point_is_in_triangle(point, A, B, C)
+            if idx is not torch.empty(0):
+                opacity_tabs.append(opacity[idx])
+                rgb_tabs.append(rgb_color[idx])
+                # print("opa:, " , opacity_tabs[0].shape)
+                # print("rgb:, " , rgb_tabs[0].shape)
             else:
                 assert False, "Triangle not found for point"
-    coords = torch.stack(coords)
-    coords = coords.view(N_rays, N_samples, 3)
-    return coords
+    opacity_tabs = torch.stack(opacity_tabs)
+    opacity_tabs = opacity_tabs.view(N_rays, N_samples)
+    rgb_tabs = torch.stack(rgb_tabs)
+    rgb_tabs = rgb_tabs.view(N_rays, N_samples, 3)
+    # print("RGB_TABS: ", rgb_tabs.shape, " OPACITY_TABS: ", opacity_tabs.shape)
+    # RGB_TABS:  torch.Size([1024, 2, 3])  OPACITY_TABS:  torch.Size([1024, 2])
+    return opacity_tabs, rgb_tabs 
 
 
-# def calculate_barycentric_coordinates(point, vertices_A, vertices_B, vertices_C):
-#     # https://ceng2.ktu.edu.tr/~cakir/files/grafikler/Texture_Mapping.pdf
-#         v0 = vertices_B - vertices_A
-#         v1 = vertices_C - vertices_A
-#         v2 = point - vertices_A
-        
-#         d00 = torch.sum(v0 * v0, dim=1) # torch.dot() - iloczyn skalarny
-#         d01 = torch.sum(v0 * v1, dim=1) # (X*Y).sum(axis = 1) == torch.tensor([torch.dot(X[0], Y[0]),torch.dot(X[1], Y[1])])
-#         d11 = torch.sum(v1 * v1, dim=1)
-#         d20 = torch.sum(v2 * v0, dim=1)
-#         d21 = torch.sum(v2 * v1, dim=1)
-#         denom = d00 * d11 - d01 * d01
-#         v = (d11 * d20 - d01 * d21) / denom
-#         w = (d00 * d21 - d01 * d20) / denom
-#         u = 1.0 - v - w
-#         # print("u", u)
-#         # print("u", v)
-#         # print("u", w)
-#         return u, v, w
-
-
-# def check_if_point_is_in_triangle(point, vertices_A, vertices_B, vertices_C):
-#     u, v, w = calculate_barycentric_coordinates(point, vertices_A, vertices_B, vertices_C)
-#     mask = (v >= 0) & (w >= 0) & (u >= 0) & (v + w + u <= 1)
-#     if mask.any():
-#         idx = torch.nonzero(mask)[0]
-#         return u[idx] *  vertices_A[idx] + v[idx] * vertices_B[idx] + w[idx] * vertices_C[idx]
-    
-#     return torch.empty(0)
-
-
-# def find_barycentric_coordinates(points, vertices, faces):
-#     N_rays, N_samples, _ = points.shape
-#     coords = []
-#     A = vertices[faces[:, 0]]
-#     B = vertices[faces[:, 1]]
-#     C = vertices[faces[:, 2]]
-#     points = points.view(-1, 3)
-#     print("Points: ", points.shape)
-#     start_time = time.time()
-#     for point in points:
-#             coordinate = check_if_point_is_in_triangle(point, A, B, C)
-#             if coordinate is not torch.empty(0):
-#                 coords.append(coordinate)
-#             else:
-#                 assert False, "Triangle not found for point"
-#     end_time = time.time()
-#     execution_time = end_time - start_time
-#     print("Czas wykonania funkcji: ", execution_time, "sekundy")
-#     coords = torch.stack(coords)
-#     coords = coords.view(N_rays, N_samples, 3)
-#     return coords
 
 
 
@@ -490,7 +450,7 @@ def find_barycentric_coordinates(points, vertices, faces):
     # dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
     # dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
     # dists = torch.ones_like(torch.randn((num_rays, num_samples)))
-
+    # To działa dla dists:
     # coords = find_barycentric_coordinates(output_matrix, vertices, faces)
     # differences = torch.diff(coords, dim=1)
     # dists = torch.norm(differences, dim=2)
@@ -499,7 +459,7 @@ def find_barycentric_coordinates(points, vertices, faces):
     # dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
     # dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
 
-def raw2outputs(raw, output_matrix, vertices, faces, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
+def raw2outputs(opacity_tabs, rgb_tabs, raw_noise_std=0, white_bkgd=False, pytest=False):
     """Transforms model's predictions to semantically meaningful values.
     Args:
         raw: [num_rays, num_samples along ray, 4]. Prediction from model.
@@ -512,24 +472,30 @@ def raw2outputs(raw, output_matrix, vertices, faces, rays_d, raw_noise_std=0, wh
         weights: [num_rays, num_samples]. Weights assigned to each sampled color.
         depth_map: [num_rays]. Estimated distance to object.
     """
-    faces = faces.long()
-    # raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
+      # faces = faces.long()
+    # # raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
     raw2alpha = lambda raw, act_fn=F.sigmoid: act_fn(raw)
-    num_rays, num_samples = raw.shape[:2]
+    # num_rays, num_samples = raw.shape[:2]
 
 
-    rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
-    noise = 0.
-    if raw_noise_std > 0.:
-        noise = torch.randn(raw[...,3].shape) * raw_noise_std
+    rgb = torch.sigmoid(rgb_tabs)  # [N_rays, N_samples, 3]
+    # noise = 0.
+    # if raw_noise_std > 0.:
+    #     noise = torch.randn(raw[...,3].shape) * raw_noise_std
 
 
     # alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
-    alpha = raw2alpha(raw[...,3] + noise)
-    # print("Alpha: ",  alpha.shape)
-
     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
 
+    # rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
+    # noise = 0.
+    # if raw_noise_std > 0.:
+        # noise = torch.randn(raw[...,3].shape) * raw_noise_std
+
+
+    # alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
+    alpha = raw2alpha(opacity_tabs)
+    # print("Alpha: ",  alpha.shape)
     
     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
     rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
@@ -550,10 +516,12 @@ def raw2outputs(raw, output_matrix, vertices, faces, rays_d, raw_noise_std=0, wh
 def render_rays(args,
                 vertices, 
                 faces,
+                opacity, 
+                rgb_color,
                 i_iter,
                 ray_batch,
                 network_fn,
-                network_query_fn,
+                # network_query_fn,
                 retraw=False,
                 lindisp=False,
                 perturb=0.,
@@ -614,23 +582,27 @@ def render_rays(args,
     output_matrix = torch.zeros((rays_d.shape[0], num_nonzero_points, 3), dtype=torch.float64)
     output_matrix[:, :num_nonzero_points, :] = sorted_matrix[:, :num_nonzero_points, :]
 
-    if i_iter%10 == 0:
-        plot_selected_points_on_sphere(output_matrix, vertices, faces, 'vertices_spr' + str(i_iter)+ '.html')
+    if i_iter%500 == 0:
+        try:
+            plot_selected_points_on_sphere(output_matrix, vertices, faces, 'vertices_' + str(i_iter)+ '.html')
+        except:
+            print("Error during plot selected points on sphere")
     
+    opacity_tabs, rgb_tabs = [], []
+
     if args.coords == True:
         faces = faces.long()
-        coords = find_barycentric_coordinates(output_matrix, vertices, faces)
-        pts = coords
+        opacity_tabs, rgb_tabs = find_barycentric_coordinates(output_matrix, vertices, faces, opacity, rgb_color)
     else:
         pts = output_matrix
 
-    raw = network_query_fn(pts, viewdirs, network_fn)
-    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, output_matrix, vertices, faces, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+    # raw = network_query_fn(pts, viewdirs, network_fn)
+    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(opacity_tabs, rgb_tabs, raw_noise_std, white_bkgd, pytest=pytest)
 
 
     ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map}
-    if retraw:
-        ret['raw'] = raw
+    # if retraw:
+    #     ret['raw'] = raw
 
     for k in ret:
         if (torch.isnan(ret[k]).any() or torch.isinf(ret[k]).any()) and DEBUG:
@@ -682,7 +654,7 @@ def train():
         with open(f, 'w') as file:
             file.write(open(args.config, 'r').read())
 
-    # Create nerf model
+    # Create model
     render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer, model = create_nerf(args)
     global_step = start
 
@@ -722,10 +694,10 @@ def train():
     if use_batching:
         rays_rgb = torch.Tensor(rays_rgb).to(device)
 
-    print("Learning rate ", args.lrate)
-    print("Icosphere ", args.icosphere)
-    print("Coords", args.coords)
-    N_iters = 15000 + 1
+    # print("Learning rate ", args.lrate)
+    # print("Icosphere ", args.icosphere)
+    # print("Coords", args.coords)
+    N_iters = 150000 + 1
     print('Begin')
     print('TRAIN views are', i_train)
     print('TEST views are', i_test)
@@ -788,10 +760,13 @@ def train():
 
         #####  Core optimization loop  #####
         optimizer.zero_grad()
+
         vertices = model.get_vertices()
         faces = model.get_faces()
-
-        rgb, disp, acc, extras = render(args, vertices, faces, i,  H, W, K, chunk=args.chunk, rays=batch_rays,
+        opacity = model.get_opacity()
+        rgb_color = model.get_rgb_color()
+        
+        rgb, disp, acc, extras = render(args, vertices, faces, opacity, rgb_color, i,  H, W, K, chunk=args.chunk, rays=batch_rays,
                                                 verbose=i < 10, retraw=True,
                                                 **render_kwargs_train)
 
@@ -799,7 +774,7 @@ def train():
 
         
         img_loss = img2mse(rgb, target_s)
-        trans = extras['raw'][...,-1]
+        # trans = extras['raw'][...,-1]
         loss = img_loss
         psnr = mse2psnr(img_loss)
 
@@ -812,14 +787,13 @@ def train():
         loss.backward()
         optimizer.step()
 
-        
         for name, param in model.named_parameters():
-            if 'vertices' in name:
+            if any(keyword in name for keyword in ['faces', 'vertices', 'rgb_color', 'opacity']):
                 prev_value = prev_param_values.get(name)
                 if prev_value is not None and torch.equal(prev_value, param):
-                    print(f'Parametr {name} nie zmienił wartości po aktualizacji.')
+                    print(f'not change value: {name}')
                 else:
-                    print(f'  ZMIAAAANAAAAAAAAAAAAAAAAAAAAAAAA Parametr {name} zmienił wartość po aktualizacji:')
+                    print(f'change value: {name}')
                 prev_param_values[name] = param.clone().detach()
 
         # NOTE: IMPORTANT!
@@ -837,7 +811,7 @@ def train():
         if i%args.i_video==0 and i > 0:
             # Turn on testing mode
             with torch.no_grad():
-                rgbs, disps = render_path(args, vertices, faces, i,  render_poses, hwf, K, args.chunk, render_kwargs_test)
+                rgbs, disps = render_path(args, vertices, faces,  opacity, rgb_color, i,  render_poses, hwf, K, args.chunk, render_kwargs_test)
             print('Done, saving', rgbs.shape, disps.shape)
             moviebase = os.path.join(basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
             imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)

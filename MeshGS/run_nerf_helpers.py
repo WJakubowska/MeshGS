@@ -6,6 +6,7 @@ from utils.triangles_utils import get_unique_triangles, get_triangles_as_indices
 from icosphere import Icosphere
 from triangle import Triangle
 from utils.gs import setup_training_input
+from ball import *
 
 
 # Misc
@@ -67,6 +68,122 @@ def get_embedder(multires, i=0):
 
 
 # Model
+
+class MeshGS(nn.Module):
+    def __init__(self, N_rand, N_sample, mesh_icosphere = True,  use_viewdirs=False):
+        super(MeshGS, self).__init__()
+        # self.active_sh_degree = 0
+        # self.max_sh_degree = 3
+        # self._xyz = torch.empty(0)
+        # self._features_dc = torch.empty(0)
+        # self._features_rest = torch.empty(0)
+        # self._opacity = torch.empty(0)
+        # self.max_radii2D = torch.empty(0)
+        # self.xyz_gradient_accum = torch.empty(0)
+        # self.denom = torch.empty(0)
+        # self.optimizer = None
+        # self.percent_dense = 0
+        # self.spatial_lr_scale = 0
+        self.N_rand = N_rand
+        self.N_sample = N_sample
+        self.rgb_color = None
+        self.opacity = None
+        self.vertices = None
+        self.faces = None
+        self.opacity_activation = torch.sigmoid
+        self.inverse_opacity_activation = self.inverse_sigmoid
+
+        if mesh_icosphere == True:
+            self.unique_vertices, self.traingles = self.create_mesh_icosphere()
+        else: 
+            self.unique_vertices, self.traingles = self.create_mesh_sphere()
+        
+        self.setup_training_input(self.unique_vertices, self.traingles)
+
+    def create_mesh_icosphere(self, center_point = (0, 0, 0), radius = [2, 1], n_subdivisions = 2):
+        self.mesh = Icosphere(n_subdivisions, center_point, radius)
+        vertices, triangles = icosphere.vertices, icosphere.triangles
+        unique_triangles = get_unique_triangles(triangles)
+        unique_vertices = icosphere.get_all_vertices()
+        triangles = get_triangles_as_indices(unique_vertices, triangles)
+        # self.vertices = unique_vertices
+        # self.faces = result_triangles
+        return unique_vertices, traingles
+    
+    def create_mesh_sphere(self, n_slices = 10, n_stacks = 10):
+        unique_vertices, triangles = uv_sphere(n_slices, n_stacks)
+        triangles = get_triangles_as_indices(unique_vertices, triangles)
+        # faces, features_dc, features_rest, opacity, vertices = setup_training_input(vertices, result_triangles)
+        return unique_vertices, triangles
+
+    def get_vertices(self):
+        return self.vertices
+
+    def get_faces(self):
+        return self.faces 
+
+    def get_opacity(self):
+        return self.opacity
+    
+    def get_rgb_color(self):
+        return self.rgb_color
+
+    def inverse_sigmoid(self, x):
+        return torch.log(x/(1-x))
+
+
+    def setup_training_input(self, unique_vertices, result_triangles):
+        # We create random points inside the bounds of the synthetic Blender scenes
+        # xyz = np.random.random((self.num_pts, 3)) * 2.6 - 1.3
+        # points = xyz
+        # shs = np.random.random((self.num_pts, 3)) / 255.0
+        # colors=SH2RGB(shs)
+
+
+        # fused_point_cloud = torch.tensor(np.asarray(points)).float()
+        # fused_color = RGB2SH(torch.tensor(np.asarray(colors)).float())
+        # features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float()
+        # features[:, :3, 0 ] = fused_color
+        # features[:, 3:, 1:] = 0.0
+
+        # opacities = self.inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float))
+
+        coordinates_list = [(vertex.x, vertex.y, vertex.z) for vertex in unique_vertices]
+        vertices_tensor = torch.tensor(coordinates_list, dtype=torch.float64, requires_grad=True)
+    
+        vertices_table = nn.Parameter(vertices_tensor)
+
+        r_triangles = torch.tensor(result_triangles, dtype=torch.float64, requires_grad=False)
+        # self.xyz = nn.Parameter(r_triangles.requires_grad_(False))  # odpowiednik to wierzchołki grafu
+        # self.features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
+        # self.features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
+        # self.opacity = nn.Parameter(opacities.requires_grad_(True))
+        
+        self.faces = torch.nn.Parameter(r_triangles, requires_grad=False)
+        self.vertices = torch.nn.Parameter(vertices_tensor, requires_grad=True)
+        # self.opacity = torch.nn.Parameter(torch.ones(self.N_rand, self.N_sample), requires_grad=True)
+        # self.rgb_color = torch.nn.Parameter(torch.ones(self.N_rand, self.N_sample, 3), requires_grad=True)
+
+        self.opacity = torch.nn.Parameter(torch.ones(r_triangles.shape[0]), requires_grad=True)
+        self.rgb_color = torch.nn.Parameter(torch.ones(r_triangles.shape[0], 3), requires_grad=True)
+
+        #print("Shape:")
+        #print("vertices_table: ", vertices_table.shape)
+        #print("xyz: ", self.xyz.shape)
+        #print("features_dc: ", self.features_dc.shape)
+        #print("features_rest: ", self.features_rest.shape)
+        #print("opacity: ", self.opacity.shape)
+
+
+    def update_learning_rate(self, iteration):
+        ''' Learning rate scheduling per step '''
+        for param_group in self.optimizer.param_groups:
+            if param_group["name"] == "xyz":
+                lr = self.xyz_scheduler_args(iteration)
+                param_group['lr'] = lr
+                return lr
+
+
 class NeRF(nn.Module):
     def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False):
         """ 
