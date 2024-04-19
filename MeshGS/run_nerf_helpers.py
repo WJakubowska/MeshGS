@@ -84,6 +84,7 @@ class MeshGS(nn.Module):
         # self.optimizer = None
         # self.percent_dense = 0
         # self.spatial_lr_scale = 0
+
         self.N_rand = N_rand
         self.N_sample = N_sample
         self.rgb_color = None
@@ -106,14 +107,11 @@ class MeshGS(nn.Module):
         unique_triangles = get_unique_triangles(triangles)
         unique_vertices = icosphere.get_all_vertices()
         triangles = get_triangles_as_indices(unique_vertices, triangles)
-        # self.vertices = unique_vertices
-        # self.faces = result_triangles
         return unique_vertices, traingles
     
     def create_mesh_sphere(self, n_slices = 10, n_stacks = 10):
         unique_vertices, triangles = uv_sphere(n_slices, n_stacks)
         triangles = get_triangles_as_indices(unique_vertices, triangles)
-        # faces, features_dc, features_rest, opacity, vertices = setup_training_input(vertices, result_triangles)
         return unique_vertices, triangles
 
     def get_vertices(self):
@@ -164,8 +162,8 @@ class MeshGS(nn.Module):
         # self.opacity = torch.nn.Parameter(torch.ones(self.N_rand, self.N_sample), requires_grad=True)
         # self.rgb_color = torch.nn.Parameter(torch.ones(self.N_rand, self.N_sample, 3), requires_grad=True)
 
-        self.opacity = torch.nn.Parameter(torch.ones(r_triangles.shape[0]), requires_grad=True)
-        self.rgb_color = torch.nn.Parameter(torch.ones(r_triangles.shape[0], 3), requires_grad=True)
+        self.opacity = torch.nn.Parameter(torch.zeros(r_triangles.shape[0]), requires_grad=True)
+        self.rgb_color = torch.nn.Parameter(torch.zeros(r_triangles.shape[0], 3), requires_grad=True)
 
         #print("Shape:")
         #print("vertices_table: ", vertices_table.shape)

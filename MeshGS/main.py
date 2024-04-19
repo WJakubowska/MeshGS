@@ -1,5 +1,5 @@
 from icosphere import Icosphere
-from utils.display_sphere import plot_selected_points_on_sphere
+from utils.display_sphere import *
 from utils.triangles_utils import get_triangles_as_indices
 from utils.gs import setup_training_input
 from load_blender import load_blender_data
@@ -116,7 +116,7 @@ def config_parser():
                         help='frequency of console printout and metric loggin')
     parser.add_argument("--i_img",     type=int, default=500, 
                         help='frequency of tensorboard image logging')
-    parser.add_argument("--i_video",   type=int, default=500, 
+    parser.add_argument("--i_video",   type=int, default=10000, 
                         help='frequency of render_poses video saving')
     
     # ray tracking options
@@ -139,34 +139,6 @@ def config_parser():
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
 DEBUG = False
-
-
-# def batchify(fn, chunk):
-#     """Constructs a version of 'fn' that applies to smaller batches.
-#     """
-#     if chunk is None:
-#         return fn
-#     def ret(inputs):
-#         return torch.cat([fn(inputs.float()[i:i+chunk]) for i in range(0, inputs.float().shape[0], chunk)], 0)
-#     return ret
-
-
-# def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
-#     """Prepares inputs and applies network 'fn'.
-#     """
-#     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
-#     embedded = embed_fn(inputs_flat)
-
-#     if viewdirs is not None:
-#         input_dirs = viewdirs[:,None].expand(inputs.shape)
-#         input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
-#         embedded_dirs = embeddirs_fn(input_dirs_flat)
-#         embedded = torch.cat([embedded, embedded_dirs], -1)
-
-#     outputs_flat = batchify(fn, netchunk)(embedded)
-#     outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
-#     return outputs
-
 
 def batchify_rays(args, vertices, faces,  opacity, rgb_color, i_iter,  rays_flat, chunk=1024*32, **kwargs):
     """Render rays in smaller minibatches to avoid OOM.
@@ -213,11 +185,9 @@ def render(args, vertices, faces, opacity, rgb_color, i_iter,  H, W, K, chunk=10
       extras: dict with everything returned by render_rays().
     """
     if c2w is not None:
-        # print('pierwszy')
         # special case to render full image
         rays_o, rays_d = get_rays(H, W, K, c2w)
     else:
-        # print('drugi')
         # use provided ray batch
         rays_o, rays_d = rays
 
@@ -231,7 +201,6 @@ def render(args, vertices, faces, opacity, rgb_color, i_iter,  H, W, K, chunk=10
         viewdirs = torch.reshape(viewdirs, [-1,3]).float()
 
     sh = rays_d.shape # [..., 3]
-    print("Sh: ", sh, " rays_d ", rays_d.shape)
     if ndc:
         # for forward facing scenes
         rays_o, rays_d = ndc_rays(H, W, K[0][0], 1., rays_o, rays_d)
@@ -247,10 +216,10 @@ def render(args, vertices, faces, opacity, rgb_color, i_iter,  H, W, K, chunk=10
 
     # Render and reshape
     all_ret = batchify_rays(args, vertices, faces, opacity, rgb_color, i_iter, rays, chunk, **kwargs)
-    # print("Chunk, " , chunk, "all_ret", list(all_ret))
+
     for k in all_ret:
         k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
-        # print("k_sh ", len(k_sh))
+        # print("k ", k, " k_sh ", k_sh, " all_ret[k].shape ", all_ret[k].shape)
         all_ret[k] = torch.reshape(all_ret[k], k_sh)
 
     k_extract = ['rgb_map', 'disp_map', 'acc_map']
@@ -275,7 +244,6 @@ def render_path(args, vertices, faces, opacity, rgb_color, i_iter,  render_poses
     t = time.time()
     for i, c2w in enumerate(tqdm(render_poses)):
         rgb, disp, acc, _ = render(args, vertices, faces,  opacity, rgb_color, i_iter,  H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
-        # rgb, disp, acc, _ = render(args, vertices, faces,  opacity, rgb_color, i_iter,  H, W, K, chunk=chunk, c2w=None, **render_kwargs)
         rgbs.append(rgb.cpu().numpy())
         disps.append(disp.cpu().numpy())
         if i==0:
@@ -320,32 +288,11 @@ def create_nerf(args):
     skips = [4]
 
     faces, vertices = None, None
-    # print("ico:", args.icosphere)
-    # if args.icosphere == True:
-    #     center_point = (0, 0, 0)
-    #     radius = [2, 1]
-    #     n_subdivisions = 2
-    #     faces, vertices = create_icosphere(center_point, radius, n_subdivisions)
-    # else:  
-    #     n_slices = 10
-    #     n_stacks = 10
-    #     vertices, triangles = uv_sphere(n_slices, n_stacks)
-    #     result_triangles = get_triangles_as_indices(vertices, triangles)
-    #     faces, features_dc, features_rest, opacity, vertices = setup_training_input(vertices, result_triangles)
-    model = MeshGS(N_rand = args.N_rand, N_sample = args.points,  mesh_icosphere = args.icosphere, use_viewdirs=args.use_viewdirs).to(device)
 
-    # model = NeRF(D=args.netdepth, W=args.netwidth,
-    #              input_ch=input_ch, output_ch=output_ch, skips=skips,
-    #              input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
-    # model.vertices = torch.nn.Parameter(vertices, requires_grad =True)
-    # model.faces = torch.nn.Parameter(faces.float(), requires_grad=False)
+    model = MeshGS(N_rand = args.N_rand, N_sample = args.points,  mesh_icosphere = args.icosphere, use_viewdirs=args.use_viewdirs).to(device)
 
     grad_vars = list(model.parameters())
     model_fine = None
-    # network_query_fn = lambda inputs, viewdirs, network_fn : run_network(inputs, viewdirs, network_fn,
-    #                                                             embed_fn=embed_fn,
-    #                                                             embeddirs_fn=embeddirs_fn,
-    #                                                             netchunk=args.netchunk)
 
     # Create optimizer
     optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
@@ -365,7 +312,6 @@ def create_nerf(args):
     ##########################
 
     render_kwargs_train = {
-        # 'network_query_fn' : network_query_fn,
         'perturb' : args.perturb,
         'network_fine' : model_fine,
         'network_fn' : model,
@@ -521,7 +467,6 @@ def render_rays(args,
                 i_iter,
                 ray_batch,
                 network_fn,
-                # network_query_fn,
                 retraw=False,
                 lindisp=False,
                 perturb=0.,
@@ -559,51 +504,57 @@ def render_rays(args,
       acc0: See acc_map. Output for coarse model.
     """
     # pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
-    N_rays = ray_batch.shape[0]
+
+    opacity_tabs, rgb_tabs, points_tabs = [], [], []
+    N_rays = 0
+
     rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each
     viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 8 else None
+
+    # plot_rays_mesh_and_points(rays_o, rays_d, vertices, faces.long(), [0,0,0], 10)
     
     out = find_intersection_points_with_mesh(vertices, faces, rays_o, rays_d)
+    pts = out['pts'] # [N_rays, N_samples, 3]
+    valid_point = out['valid_point'] # [N_rays, N_samples]
 
-    # Uzyskanie punktów przecięcia w formie: [liczba promieni, maksymalna liczba punktów przecięcia, 3]
-    valid_indices = out['valid_point'].nonzero(as_tuple=True)
-    selected_pts = torch.zeros_like(out['pts'])
-    selected_pts[valid_indices[0], valid_indices[1], :] = out['pts'][valid_indices[0], valid_indices[1], :]
-    selected_pts = selected_pts.view(out['pts'].shape[0], -1, 3)
-   
-    # Niezerowej liczba punktów przecięcia ( dla dwóch sfer max 4)
-    num_nonzero_points = args.points 
-    # Posortowanie tablicy punktów by niezerowe były na początku
-    # print("punkty", num_nonzero_points)
-    matrix = selected_pts
-    sorted_matrix = torch.stack([torch.tensor(sorted(row.tolist(), key=lambda x: x[0] == 0)) for row in matrix])
+    for i, ray in enumerate(out['pts']):
+        valid_points_per_ray= out['valid_point'][i] 
+        sum_valid_points_per_ray= valid_points_per_ray.sum() 
+        N_rays += 1
 
-    # Przypisanie punktów przecięcia sfery z promieniami 
-    output_matrix = torch.zeros((rays_d.shape[0], num_nonzero_points, 3), dtype=torch.float64)
-    output_matrix[:, :num_nonzero_points, :] = sorted_matrix[:, :num_nonzero_points, :]
+        if sum_valid_points_per_ray == 2:
+            valid_idx = torch.where(valid_points_per_ray == True)[0]
+            
+            for idx in valid_idx:
+                opacity_tabs.append(opacity[idx])
+                rgb_tabs.append(rgb_color[idx])
+                points_tabs.append(ray[idx])
+        else:
+            points_tabs.append(torch.zeros(3))
+            points_tabs.append(torch.zeros(3))
+            opacity_tabs.append(torch.tensor(0))
+            opacity_tabs.append(torch.tensor(0))
+            rgb_tabs.append(torch.zeros(3))
+            rgb_tabs.append(torch.zeros(3))
+
+
+    opacity_tabs = torch.stack(opacity_tabs).reshape(N_rays, 2) # [N_rays, N_samples]
+    rgb_tabs = torch.stack(rgb_tabs).reshape(N_rays, -1, 3)       # [N_rays, N_samples, 3]
+    points_tabs = torch.stack(points_tabs).reshape(N_rays, -1, 3) # [N_rays, N_samples, 3] 
+    # print("rgb_tabs ", rgb_tabs.shape, N_rays)
+    # print("opacity_tabs ", opacity_tabs.shape, N_rays)
+    # print("points_tabs ", points_tabs.shape, N_rays)
 
     if i_iter%500 == 0:
         try:
-            plot_selected_points_on_sphere(output_matrix, vertices, faces, 'vertices_' + str(i_iter)+ '.html')
+            plot_selected_points_on_sphere(points_tabs, vertices, faces, 'vertices_' + str(i_iter)+ '.html')
         except:
             print("Error during plot selected points on sphere")
     
-    opacity_tabs, rgb_tabs = [], []
-
-    if args.coords == True:
-        faces = faces.long()
-        opacity_tabs, rgb_tabs = find_barycentric_coordinates(output_matrix, vertices, faces, opacity, rgb_color)
-    else:
-        pts = output_matrix
-
-    # raw = network_query_fn(pts, viewdirs, network_fn)
+    
     rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(opacity_tabs, rgb_tabs, raw_noise_std, white_bkgd, pytest=pytest)
 
-
     ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map}
-    # if retraw:
-    #     ret['raw'] = raw
-
     for k in ret:
         if (torch.isnan(ret[k]).any() or torch.isinf(ret[k]).any()) and DEBUG:
             print(f"! [Numerical Error] {k} contains nan or inf.")
@@ -694,10 +645,7 @@ def train():
     if use_batching:
         rays_rgb = torch.Tensor(rays_rgb).to(device)
 
-    # print("Learning rate ", args.lrate)
-    # print("Icosphere ", args.icosphere)
-    # print("Coords", args.coords)
-    N_iters = 150000 + 1
+    N_iters = 200000 + 1
     print('Begin')
     print('TRAIN views are', i_train)
     print('TEST views are', i_test)
@@ -787,14 +735,14 @@ def train():
         loss.backward()
         optimizer.step()
 
-        for name, param in model.named_parameters():
-            if any(keyword in name for keyword in ['faces', 'vertices', 'rgb_color', 'opacity']):
-                prev_value = prev_param_values.get(name)
-                if prev_value is not None and torch.equal(prev_value, param):
-                    print(f'not change value: {name}')
-                else:
-                    print(f'change value: {name}')
-                prev_param_values[name] = param.clone().detach()
+        # for name, param in model.named_parameters():
+        #     if any(keyword in name for keyword in ['faces', 'vertices', 'rgb_color', 'opacity']):
+        #         prev_value = prev_param_values.get(name)
+        #         if prev_value is not None and torch.equal(prev_value, param):
+        #             print(f'not change value: {name}')
+        #         else:
+        #             print(f'change value: {name}')
+        #         prev_param_values[name] = param.clone().detach()
 
         # NOTE: IMPORTANT!
         ###   update learning rate   ###

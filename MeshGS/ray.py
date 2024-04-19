@@ -25,8 +25,6 @@ class Rays:
         vertices: torch.Tensor,
         faces: torch.Tensor
     ):
-        # print(f'Vertices requires_grad in ray: {vertices.requires_grad}')
-        # print(f'Faces requires_grad in ray: {faces.requires_grad}')
 
         triangle_vertices = vertices[faces]
 
@@ -122,10 +120,6 @@ def find_intersection_points_with_mesh(vertices, faces, rays_o, rays_d):
         origin=rays_o,
         direction=rays_d,
     )
-
-    # print(f'Vertices requires_grad in find: {vertices.requires_grad}')
-    # print(f'Faces requires_grad in find: {faces.requires_grad}')
-    
 
     out = rays.find_intersection_points_with_mesh(
         vertices=vertices,
