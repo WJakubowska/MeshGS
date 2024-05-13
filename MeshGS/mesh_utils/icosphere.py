@@ -1,6 +1,6 @@
 import numpy as np
-from vertex import Vertex
-from triangle import Triangle
+from mesh_utils.vertex import Vertex
+from mesh_utils.triangle import Triangle
 
 class Icosphere:
     def __init__(self, n_subdivisions, center_point=(0, 0, 0), radius=[1]):

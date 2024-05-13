@@ -1,5 +1,5 @@
-from vertex import Vertex
-from triangle import Triangle
+from mesh_utils.vertex import Vertex
+from mesh_utils.triangle import Triangle
 import math
 
 def uv_sphere(n_slices, n_stacks):

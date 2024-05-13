@@ -1,10 +1,11 @@
 import torch
-import numpy as np
-from utils.triangles_utils import  get_triangles_as_indices
-from icosphere import Icosphere
-from ball import *
 import trimesh
-from vertex import Vertex
+import numpy as np
+from mesh_utils.triangles_utils import  get_triangles_as_indices
+from mesh_utils.icosphere import Icosphere
+from mesh_utils.ball import *
+from mesh_utils.vertex import Vertex
+
 
 # Misc
 img2mse = lambda x, y : torch.mean((x - y) ** 2)
@@ -17,19 +18,6 @@ to8b = lambda x : (255*np.clip(x,0,1)).astype(np.uint8)
 class MeshGS(torch.nn.Module):
     def __init__(self, mesh_icosphere = True, mesh_from_file = False, mesh_path = None):
         super(MeshGS, self).__init__()
-        # self.active_sh_degree = 0
-        # self.max_sh_degree = 3
-        # self._xyz = torch.empty(0)
-        # self._features_dc = torch.empty(0)
-        # self._features_rest = torch.empty(0)
-        # self._opacity = torch.empty(0)
-        # self.max_radii2D = torch.empty(0)
-        # self.xyz_gradient_accum = torch.empty(0)
-        # self.denom = torch.empty(0)
-        # self.optimizer = None
-        # self.percent_dense = 0
-        # self.spatial_lr_scale = 0
-
         self.rgb_color = None
         self.opacity = None
         self.vertices = None
@@ -70,7 +58,6 @@ class MeshGS(torch.nn.Module):
         return unique_vertices, triangles
     
     def create_mesh_sphere(self, n_slices = 10, n_stacks = 10):
-        print("Kuleczka")
         unique_vertices, triangles = uv_sphere(n_slices, n_stacks)
         triangles = get_triangles_as_indices(unique_vertices, triangles)
         return unique_vertices, triangles
@@ -92,19 +79,13 @@ class MeshGS(torch.nn.Module):
 
 
     def setup_training_input(self, unique_vertices, result_triangles):
-
-
         coordinates_list = [(vertex.x, vertex.y, vertex.z) for vertex in unique_vertices]
         vertices_tensor = torch.tensor(coordinates_list, dtype=torch.float64, requires_grad=False) 
-
-
         r_triangles = torch.tensor(result_triangles, dtype=torch.float64, requires_grad=False)
-
         self.faces = torch.nn.Parameter(r_triangles, requires_grad=False)
         self.vertices = torch.nn.Parameter(vertices_tensor, requires_grad=False)
         # self.opacity = torch.nn.Parameter(torch.ones(self.N_rand, self.N_sample), requires_grad=True)
         # self.rgb_color = torch.nn.Parameter(torch.ones(self.N_rand, self.N_sample, 3), requires_grad=True)
-
         self.opacity = torch.nn.Parameter(torch.zeros(r_triangles.shape[0] + 1), requires_grad=True)
         self.rgb_color = torch.nn.Parameter(torch.zeros(r_triangles.shape[0] + 1, 3), requires_grad=True)
 
@@ -113,18 +94,6 @@ class MeshGS(torch.nn.Module):
         print("Triangles: ", self.faces.shape)
         print("Opacity: ", self.opacity.shape)
         print("RGB: ", self.rgb_color.shape)
-
-
-
-    def update_learning_rate(self, iteration):
-        ''' Learning rate scheduling per step '''
-        for param_group in self.optimizer.param_groups:
-            if param_group["name"] == "xyz":
-                lr = self.xyz_scheduler_args(iteration)
-                param_group['lr'] = lr
-                return lr
-
-    
 
 
 

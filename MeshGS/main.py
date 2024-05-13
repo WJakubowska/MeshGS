@@ -1,7 +1,6 @@
 from utils.display_sphere import *
 from load_blender import load_blender_data
-from run_nerf_helpers import *
-from ray import *
+from run_meshGS_helpers import *
 from tqdm import tqdm, trange
 import openmesh as om
 import torch 
@@ -12,8 +11,8 @@ import time
 import torch.nn.functional as F
 import configargparse
 import time
-from math import exp
-
+import trimesh
+from collections import defaultdict
 
 def config_parser():
 
@@ -80,7 +79,6 @@ def config_parser():
                         help='downsample factor for LLFF images')
     parser.add_argument("--no_ndc", action='store_true', 
                         help='do not use normalized device coordinates (set for non-forward facing scenes)')
-
 
 
 
@@ -293,8 +291,7 @@ def check_if_point_is_in_triangle(point, vertices_A, vertices_B, vertices_C):
     mask = (v >= 0) & (w >= 0) & (u >= 0) & (v + w + u <= 1)
     if mask.any():
         idx = torch.nonzero(mask)[0]
-        return idx
-        # return u[idx] *  vertices_A[idx] + v[idx] * vertices_B[idx] + w[idx] * vertices_C[idx]
+        return u[idx] *  vertices_A[idx] + v[idx] * vertices_B[idx] + w[idx] * vertices_C[idx]
     
     return torch.empty(0)
 
@@ -320,27 +317,9 @@ def find_barycentric_coordinates(points, vertices, faces, opacity, rgb_color):
     opacity_tabs = opacity_tabs.view(N_rays, N_samples)
     rgb_tabs = torch.stack(rgb_tabs)
     rgb_tabs = rgb_tabs.view(N_rays, N_samples, 3)
-    # print("RGB_TABS: ", rgb_tabs.shape, " OPACITY_TABS: ", opacity_tabs.shape)
-    # RGB_TABS:  torch.Size([1024, 2, 3])  OPACITY_TABS:  torch.Size([1024, 2])
     return opacity_tabs, rgb_tabs 
 
 
-
-
-
-    # z_vals = torch.rand((num_rays, num_samples + 1))
-    # dists = z_vals[...,1:] - z_vals[...,:-1]
-    # dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
-    # dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
-    # dists = torch.ones_like(torch.randn((num_rays, num_samples)))
-    # To działa dla dists:
-    # coords = find_barycentric_coordinates(output_matrix, vertices, faces)
-    # differences = torch.diff(coords, dim=1)
-    # dists = torch.norm(differences, dim=2)
-    # # dists = z_vals[...,1:] - z_vals[...,:-1]
-    # # dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)
-    # dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
-    # dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
 
 def raw2outputs(opacity_tabs, rgb_tabs, raw_noise_std=0, white_bkgd=False, pytest=False):
     """Transforms model's predictions to semantically meaningful values.
@@ -370,7 +349,6 @@ def raw2outputs(opacity_tabs, rgb_tabs, raw_noise_std=0, white_bkgd=False, pytes
 
 
     # alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
-    # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
 
     # rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
     # noise = 0.
@@ -380,7 +358,6 @@ def raw2outputs(opacity_tabs, rgb_tabs, raw_noise_std=0, white_bkgd=False, pytes
 
     # alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
     alpha = raw2alpha(opacity_tabs)
-    # print("Alpha: ",  alpha.shape)
     
     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
     rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
@@ -432,89 +409,47 @@ def render_rays(args,
     # pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
 
     opacity_tabs, rgb_tabs = [], []
-    # N_rays = ray_batch.shape[0]
-    N_rays = 0
+    N_rays = ray_batch.shape[0]
+    
     rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each
    
    
-    out = find_intersection_points_with_mesh(vertices, faces, rays_o, rays_d)
-    pts = out['pts'] # [N_rays, N_faces, 3]
-    valid_point = out['valid_point'] # [N_rays, N_samples]
-    num_valid_points = torch.sum(valid_point, dim=1)
-    max_valid_points = max(num_valid_points)
-    # print("Max valid_points:" , max_valid_points)
-        
-    for i, ray in enumerate(pts):
-        valid_points_per_ray = valid_point[i] 
-        sum_valid_points_per_ray = num_valid_points[i]
-        N_rays += 1
+    mesh = trimesh.Trimesh(vertices=vertices.cpu(), faces=faces.cpu())
+    points, index_ray, index_tri = mesh.ray.intersects_location(ray_origins=rays_o.cpu(), ray_directions=rays_d.cpu())
+    assert isinstance(mesh.ray, trimesh.ray.ray_pyembree.RayMeshIntersector), "The mesh doesn't use pyembree."
 
-        if sum_valid_points_per_ray > 0:
-            valid_idx = torch.where(valid_points_per_ray)[0]
-            diff = max_valid_points - sum_valid_points_per_ray
-            opacity_tabs.extend(opacity[valid_idx])
-            rgb_tabs.extend(rgb_color[valid_idx])
+    ray_to_tri_dict = defaultdict(list)
+    for ray_index, tri_value in zip(index_ray, index_tri):
+        ray_to_tri_dict[ray_index].append(tri_value)
+    ray_to_tri_dict = dict(ray_to_tri_dict)
+    additional_keys = {key: None for key in range(N_rays) if key not in ray_to_tri_dict}
+    ray_to_tri_dict.update(additional_keys)
 
-            if diff > 0:
-                opacity_tabs.extend([torch.tensor(0)] * diff)
-                rgb_tabs.extend([torch.zeros(3)] * diff)
- 
-        else:
-            if max_valid_points == 0:
-                prob = 1
+    if len(points) == 0:
+        opacity_tabs = torch.tensor([opacity[-1] for _ in range(N_rays)]).unsqueeze(1) # [N_rays, 1]
+        rgb_tabs =  rgb_color[-1].repeat(N_rays, 1, 1) # [N_rays, 1,  3] 
+
+    else:
+        unique_values, counts = np.unique(index_ray, return_counts=True)
+        max_valid_points = max(counts)
+
+        for value in ray_to_tri_dict.values():
+            if value == None:
+                opacity_tabs.extend([opacity[-1]] * max_valid_points) 
+                rgb_tabs.extend([rgb_color[-1]] * max_valid_points)
             else:
-                prob = max_valid_points
-            opacity_tabs.extend([opacity[-1]] * prob)
-            rgb_tabs.extend([rgb_color[-1]] * prob)
+                sum_valid_points_per_ray = len(value)
+                diff = max_valid_points - sum_valid_points_per_ray
+                opacity_tabs.extend(opacity[value])
+                rgb_tabs.extend(rgb_color[value])
+                if diff > 0:
+                    opacity_tabs.extend([torch.tensor(0)] * diff)
+                    rgb_tabs.extend([torch.zeros(3)] * diff)    
 
-            
-    prob = max_valid_points
-    if max_valid_points == 0:
-        prob = 1
-
-    opacity_tabs = torch.stack(opacity_tabs).reshape(N_rays, prob) # [N_rays, N_samples]
-    rgb_tabs = torch.stack(rgb_tabs).reshape(N_rays, -1, 3)       # [N_rays, N_samples, 3]
+        opacity_tabs = torch.stack(opacity_tabs).reshape(N_rays, max_valid_points) # [N_rays, N_samples]
+        rgb_tabs = torch.stack(rgb_tabs).reshape(N_rays, -1, 3)       # [N_rays, N_samples, 3]
 
 
-    # mesh = trimesh.Trimesh(vertices=vertices.cpu(), faces=faces.cpu())
-    # points, index_ray, index_tri = mesh.ray.intersects_location(ray_origins=rays_o.cpu(), ray_directions=rays_d.cpu())
-
-    # # plot_rays_mesh_and_points(rays_o, rays_d, vertices, faces.long(), [0,0,0], 10)
-
-    # ray_to_tri_dict = defaultdict(list)
-    # for ray_index, tri_value in zip(index_ray, index_tri):
-    #     ray_to_tri_dict[ray_index].append(tri_value)
-    # ray_to_tri_dict = dict(ray_to_tri_dict)
-    # additional_keys = {key: None for key in range(N_rays) if key not in ray_to_tri_dict}
-    # ray_to_tri_dict.update(additional_keys)
-
-    # unique_values, counts = np.unique(index_ray, return_counts=True)
-    # max_valid_points = max(counts)
-
-    # if max_valid_points == 0:
-    #     opacity_tabs = torch.full((N_rays, 1), opacity[-1]) # [N_rays, 1]
-    #     rgb_tabs = torch.full((N_rays, 3), rgb_color[-1]) # [N_rays, 3]
-
-    # else:
-    #     for value in ray_to_tri_dict.values():
-    #         if value == None:
-    #             opacity_tabs.extend([opacity[-1]] * max_valid_points) 
-    #             rgb_tabs.extend([rgb_color[-1]] * max_valid_points)
-    #         else:
-    #             sum_valid_points_per_ray = len(value)
-    #             diff = max_valid_points - sum_valid_points_per_ray
-    #             opacity_tabs.extend(opacity[value])
-    #             rgb_tabs.extend(rgb_color[value])
-    #             if diff > 0:
-    #                 opacity_tabs.extend([torch.tensor(0)] * diff)
-    #                 rgb_tabs.extend([torch.zeros(3)] * diff)    
-
-    #     opacity_tabs = torch.stack(opacity_tabs).reshape(N_rays, max_valid_points) # [N_rays, N_samples]
-    #     rgb_tabs = torch.stack(rgb_tabs).reshape(N_rays, -1, 3)       # [N_rays, N_samples, 3]
-
-    # print("rgb_tabs ", rgb_tabs.shape, N_rays)
-    # print("opacity_tabs ", opacity_tabs.shape, N_rays)
-    # print("points_tabs ", points_tabs.shape, N_rays)
 
     # if i_iter%500 == 0:
     # if i_iter == 1:
@@ -536,9 +471,9 @@ def render_rays(args,
 
 def save_mesh_as_file(vertices, faces, colors, opacity, filename):
     mesh = om.TriMesh()
-    vertices = np.array(vertices.detach().numpy())
-    colors = np.array(colors.detach().numpy())
-    opacity = np.array(opacity.detach().numpy())
+    vertices = np.array(vertices.detach().cpu().numpy())
+    colors = np.array(colors.detach().cpu().numpy())
+    opacity = np.array(opacity.detach().cpu().numpy())
     for vertex in vertices:
         mesh.add_vertex(vertex)
 
@@ -552,6 +487,8 @@ def save_mesh_as_file(vertices, faces, colors, opacity, filename):
 
     om.write_mesh(filename + '.obj', mesh, face_color=True)
     om.write_mesh(filename + '.ply', mesh, face_color=True)
+
+
 
 
 def train():
@@ -700,35 +637,23 @@ def train():
                 target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
 
         #####  Core optimization loop  #####
-        # optimizer.zero_grad()
+        optimizer.zero_grad()
 
         vertices = model.get_vertices()
         faces = model.get_faces()
         opacity = model.get_opacity()
         rgb_color = model.get_rgb_color()
 
-        # print("v", vertices)
-        # print("f", faces)
-        # print("o", opacity)
-        # print("c", rgb_color)
-
-
-        
         rgb, disp, acc, extras = render(args, vertices, faces, opacity, rgb_color, i,  H, W, K, chunk=args.chunk, rays=batch_rays,
-                                                verbose=i < 10, 
+                                                verbose=i < 10,
                                                 **render_kwargs_train)
 
 
 
-        # gt_image = target_s.cuda()
-        # image = rgb
-        # lambda_dssim = 0.2
-        # Ll1 = l1_loss(image, gt_image)
-        # img_loss = (1.0 - lambda_dssim) * Ll1 + lambda_dssim * (1.0 - ssim(image, gt_image))
+
         img_loss = img2mse(rgb, target_s)
         # img_loss = torch.abs((rgb - target_s)).mean()
         
-        # trans = extras['raw'][...,-1]
         loss = img_loss
         # print("loss ", img_loss)
         psnr = mse2psnr(img_loss)
@@ -771,12 +696,17 @@ def train():
                 opacity = model.get_opacity()
                 rgb_color = model.get_rgb_color()
                 rgbs, disps = render_path(args, vertices, faces,  opacity, rgb_color, i,  render_poses, hwf, K, args.chunk, render_kwargs_test)
+
             print('Done, saving', rgbs.shape, disps.shape)
             moviebase = os.path.join(basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
             meshbase = os.path.join(basedir, expname, '{}_mesh_{:06d}_'.format(expname, i))
             imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
             imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
-            save_mesh_as_file(vertices, faces, rgb_color, opacity, meshbase)
+            try:
+                save_mesh_as_file(vertices, faces, rgb_color, opacity, meshbase)
+            except:
+                print("Save mesh failed")
+
     
         if i%args.i_print==0:
             tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")

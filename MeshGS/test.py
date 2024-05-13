@@ -1,7 +1,7 @@
-from icosphere import Icosphere
+from MeshGS.mesh_utils.icosphere import Icosphere
 from utils.display_sphere import *
-from utils.triangles_utils import *
-from triangle import Triangle
+from MeshGS.mesh_utils.triangles_utils import *
+from MeshGS.mesh_utils.triangle import Triangle
 from torch import nn
 import torch 
 from utils.gs import setup_training_input
