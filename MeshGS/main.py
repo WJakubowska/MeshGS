@@ -1,13 +1,9 @@
-from icosphere import Icosphere
 from utils.display_sphere import *
-from utils.triangles_utils import get_triangles_as_indices
-from utils.gs import setup_training_input
 from load_blender import load_blender_data
 from run_nerf_helpers import *
 from ray import *
-from ball import *
 from tqdm import tqdm, trange
-
+import openmesh as om
 import torch 
 import numpy as np
 import os
@@ -16,6 +12,8 @@ import time
 import torch.nn.functional as F
 import configargparse
 import time
+from math import exp
+
 
 def config_parser():
 
@@ -31,14 +29,6 @@ def config_parser():
                         help='input data directory')
 
     # training options
-    parser.add_argument("--netdepth", type=int, default=8, 
-                        help='layers in network')
-    parser.add_argument("--netwidth", type=int, default=256, 
-                        help='channels per layer')
-    parser.add_argument("--netdepth_fine", type=int, default=8, 
-                        help='layers in fine network')
-    parser.add_argument("--netwidth_fine", type=int, default=256, 
-                        help='channels per layer in fine network')
     parser.add_argument("--N_rand", type=int, default=32*32*4, 
                         help='batch size (number of random rays per gradient step)')
     parser.add_argument("--lrate", type=float, default=5e-4, 
@@ -47,31 +37,17 @@ def config_parser():
                         help='exponential learning rate decay (in 1000 steps)')
     parser.add_argument("--chunk", type=int, default=1024*32, 
                         help='number of rays processed in parallel, decrease if running out of memory')
-    parser.add_argument("--netchunk", type=int, default=1024*64, 
-                        help='number of pts sent through network in parallel, decrease if running out of memory')
     parser.add_argument("--no_batching", action='store_true', 
                         help='only take random rays from 1 image at a time')
-    parser.add_argument("--no_reload", action='store_true', 
-                        help='do not reload weights from saved ckpt')
     parser.add_argument("--ft_path", type=str, default=None, 
                         help='specific weights npy file to reload for coarse network')
 
     # rendering options
-    parser.add_argument("--perturb", type=float, default=1.,
-                        help='set to 0. for no jitter, 1. for jitter')
     parser.add_argument("--use_viewdirs", action='store_true', 
                         help='use full 5D input instead of 3D')
-    parser.add_argument("--i_embed", type=int, default=0, 
-                        help='set 0 for default positional encoding, -1 for none')
-    parser.add_argument("--multires", type=int, default=10, 
-                        help='log2 of max freq for positional encoding (3D location)')
-    parser.add_argument("--multires_views", type=int, default=4, 
-                        help='log2 of max freq for positional encoding (2D direction)')
     parser.add_argument("--raw_noise_std", type=float, default=0., 
                         help='std dev of noise added to regularize sigma_a output, 1e0 recommended')
 
-    parser.add_argument("--render_only", action='store_true', 
-                        help='do not optimize, reload weights and render out render_poses path')
     parser.add_argument("--render_test", action='store_true', 
                         help='render the test set instead of render_poses path')
     parser.add_argument("--render_factor", type=int, default=0, 
@@ -104,12 +80,9 @@ def config_parser():
                         help='downsample factor for LLFF images')
     parser.add_argument("--no_ndc", action='store_true', 
                         help='do not use normalized device coordinates (set for non-forward facing scenes)')
-    parser.add_argument("--lindisp", action='store_true', 
-                        help='sampling linearly in disparity rather than depth')
-    parser.add_argument("--spherify", action='store_true', 
-                        help='set for spherical 360 scenes')
-    parser.add_argument("--llffhold", type=int, default=8, 
-                        help='will take every 1/N images as LLFF test set, paper uses 8')
+
+
+
 
     # logging/saving options
     parser.add_argument("--i_print",   type=int, default=100, 
@@ -124,8 +97,7 @@ def config_parser():
                         help='if true, the sphere is an isosphere, if false, the sphere is a sphere')
     parser.add_argument("--coords", action='store_true', 
                         help='if true, barycentric coordinates are used for rendering')    
-    parser.add_argument("--points", type=int, default=4, 
-                        help='number of intersections between the mesh and the sphere')   
+  
 
 
     return parser
@@ -266,30 +238,10 @@ def render_path(args, vertices, faces, opacity, rgb_color, i_iter,  render_poses
 
     return rgbs, disps
 
-def create_icosphere(center_point, radius, n_subdivisions):
-    icosphere = Icosphere(n_subdivisions, center_point, radius)
-    vertices, triangles = icosphere.vertices, icosphere.triangles
-    unique_vertices = icosphere.get_all_vertices()
-    result_triangles = get_triangles_as_indices(unique_vertices, triangles)
-    faces, features_dc, features_rest, opacity, vertices = setup_training_input(unique_vertices, result_triangles)
-    return faces, vertices
 
+def create_MeshGS(args):
 
-def create_nerf(args):
-    """Instantiate NeRF's MLP model.
-    """
-    embed_fn, input_ch = get_embedder(args.multires, args.i_embed)
-
-    input_ch_views = 0
-    embeddirs_fn = None
-    if args.use_viewdirs:
-        embeddirs_fn, input_ch_views = get_embedder(args.multires_views, args.i_embed)
-    output_ch = 4
-    skips = [4]
-
-    faces, vertices = None, None
-
-    model = MeshGS(N_rand = args.N_rand, N_sample = args.points,  mesh_icosphere = args.icosphere, use_viewdirs=args.use_viewdirs).to(device)
+    model = MeshGS(mesh_icosphere = args.icosphere, mesh_from_file=False, mesh_path='./data1/mesh_test.ply').to(device)
 
     grad_vars = list(model.parameters())
     model_fine = None
@@ -298,23 +250,10 @@ def create_nerf(args):
     optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
 
     start = 0
-    basedir = args.basedir
-    expname = args.expname
-
-    ##########################
-
-    # Load checkpoints
-    if args.ft_path is not None and args.ft_path!='None':
-        ckpts = [args.ft_path]
-    else:
-        ckpts = [os.path.join(basedir, expname, f) for f in sorted(os.listdir(os.path.join(basedir, expname))) if 'tar' in f]
-
+    
     ##########################
 
     render_kwargs_train = {
-        'perturb' : args.perturb,
-        'network_fine' : model_fine,
-        'network_fn' : model,
         'use_viewdirs' : args.use_viewdirs,
         'white_bkgd' : args.white_bkgd,
         'raw_noise_std' : args.raw_noise_std,
@@ -324,10 +263,8 @@ def create_nerf(args):
     if args.dataset_type != 'llff' or args.no_ndc:
         print('Not ndc!')
         render_kwargs_train['ndc'] = False
-        render_kwargs_train['lindisp'] = args.lindisp
 
     render_kwargs_test = {k : render_kwargs_train[k] for k in render_kwargs_train}
-    render_kwargs_test['perturb'] = False
     render_kwargs_test['raw_noise_std'] = 0.
 
     return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer, model
@@ -424,7 +361,9 @@ def raw2outputs(opacity_tabs, rgb_tabs, raw_noise_std=0, white_bkgd=False, pytes
     # num_rays, num_samples = raw.shape[:2]
 
 
-    rgb = torch.sigmoid(rgb_tabs)  # [N_rays, N_samples, 3]
+    rgb = torch.sigmoid(rgb_tabs) # jak sigmoid to zera w dodawaniu pkt  # [N_rays, N_samples, 3]
+    # rgb = rgb_tabs
+
     # noise = 0.
     # if raw_noise_std > 0.:
     #     noise = torch.randn(raw[...,3].shape) * raw_noise_std
@@ -466,11 +405,6 @@ def render_rays(args,
                 rgb_color,
                 i_iter,
                 ray_batch,
-                network_fn,
-                retraw=False,
-                lindisp=False,
-                perturb=0.,
-                network_fine=None,
                 white_bkgd=False,
                 raw_noise_std=0.,
                 verbose=False,
@@ -483,14 +417,6 @@ def render_rays(args,
       ray_batch: array of shape [batch_size, ...]. All information necessary
         for sampling along a ray, including: ray origin, ray direction, min
         dist, max dist, and unit-magnitude viewing direction.
-      network_fn: function. Model for predicting RGB and density at each point
-        in space.
-      network_query_fn: function used for passing queries to network_fn.
-      retraw: bool. If True, include model's raw, unprocessed predictions.
-      lindisp: bool. If True, sample linearly in inverse depth rather than in depth.
-      perturb: float, 0 or 1. If non-zero, each ray is sampled at stratified
-        random points in time.
-      network_fine: "fine" network with same spec as network_fn.
       white_bkgd: bool. If True, assume a white background.
       raw_noise_std: ...
       verbose: bool. If True, print more debugging info.
@@ -505,51 +431,97 @@ def render_rays(args,
     """
     # pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
 
-    opacity_tabs, rgb_tabs, points_tabs = [], [], []
+    opacity_tabs, rgb_tabs = [], []
+    # N_rays = ray_batch.shape[0]
     N_rays = 0
-
     rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each
-    viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 8 else None
-
-    # plot_rays_mesh_and_points(rays_o, rays_d, vertices, faces.long(), [0,0,0], 10)
-    
+   
+   
     out = find_intersection_points_with_mesh(vertices, faces, rays_o, rays_d)
-    pts = out['pts'] # [N_rays, N_samples, 3]
+    pts = out['pts'] # [N_rays, N_faces, 3]
     valid_point = out['valid_point'] # [N_rays, N_samples]
-
-    for i, ray in enumerate(out['pts']):
-        valid_points_per_ray= out['valid_point'][i] 
-        sum_valid_points_per_ray= valid_points_per_ray.sum() 
+    num_valid_points = torch.sum(valid_point, dim=1)
+    max_valid_points = max(num_valid_points)
+    # print("Max valid_points:" , max_valid_points)
+        
+    for i, ray in enumerate(pts):
+        valid_points_per_ray = valid_point[i] 
+        sum_valid_points_per_ray = num_valid_points[i]
         N_rays += 1
 
-        if sum_valid_points_per_ray == 2:
-            valid_idx = torch.where(valid_points_per_ray == True)[0]
-            
-            for idx in valid_idx:
-                opacity_tabs.append(opacity[idx])
-                rgb_tabs.append(rgb_color[idx])
-                points_tabs.append(ray[idx])
+        if sum_valid_points_per_ray > 0:
+            valid_idx = torch.where(valid_points_per_ray)[0]
+            diff = max_valid_points - sum_valid_points_per_ray
+            opacity_tabs.extend(opacity[valid_idx])
+            rgb_tabs.extend(rgb_color[valid_idx])
+
+            if diff > 0:
+                opacity_tabs.extend([torch.tensor(0)] * diff)
+                rgb_tabs.extend([torch.zeros(3)] * diff)
+ 
         else:
-            points_tabs.append(torch.zeros(3))
-            points_tabs.append(torch.zeros(3))
-            opacity_tabs.append(torch.tensor(0))
-            opacity_tabs.append(torch.tensor(0))
-            rgb_tabs.append(torch.zeros(3))
-            rgb_tabs.append(torch.zeros(3))
+            if max_valid_points == 0:
+                prob = 1
+            else:
+                prob = max_valid_points
+            opacity_tabs.extend([opacity[-1]] * prob)
+            rgb_tabs.extend([rgb_color[-1]] * prob)
 
+            
+    prob = max_valid_points
+    if max_valid_points == 0:
+        prob = 1
 
-    opacity_tabs = torch.stack(opacity_tabs).reshape(N_rays, 2) # [N_rays, N_samples]
+    opacity_tabs = torch.stack(opacity_tabs).reshape(N_rays, prob) # [N_rays, N_samples]
     rgb_tabs = torch.stack(rgb_tabs).reshape(N_rays, -1, 3)       # [N_rays, N_samples, 3]
-    points_tabs = torch.stack(points_tabs).reshape(N_rays, -1, 3) # [N_rays, N_samples, 3] 
+
+
+    # mesh = trimesh.Trimesh(vertices=vertices.cpu(), faces=faces.cpu())
+    # points, index_ray, index_tri = mesh.ray.intersects_location(ray_origins=rays_o.cpu(), ray_directions=rays_d.cpu())
+
+    # # plot_rays_mesh_and_points(rays_o, rays_d, vertices, faces.long(), [0,0,0], 10)
+
+    # ray_to_tri_dict = defaultdict(list)
+    # for ray_index, tri_value in zip(index_ray, index_tri):
+    #     ray_to_tri_dict[ray_index].append(tri_value)
+    # ray_to_tri_dict = dict(ray_to_tri_dict)
+    # additional_keys = {key: None for key in range(N_rays) if key not in ray_to_tri_dict}
+    # ray_to_tri_dict.update(additional_keys)
+
+    # unique_values, counts = np.unique(index_ray, return_counts=True)
+    # max_valid_points = max(counts)
+
+    # if max_valid_points == 0:
+    #     opacity_tabs = torch.full((N_rays, 1), opacity[-1]) # [N_rays, 1]
+    #     rgb_tabs = torch.full((N_rays, 3), rgb_color[-1]) # [N_rays, 3]
+
+    # else:
+    #     for value in ray_to_tri_dict.values():
+    #         if value == None:
+    #             opacity_tabs.extend([opacity[-1]] * max_valid_points) 
+    #             rgb_tabs.extend([rgb_color[-1]] * max_valid_points)
+    #         else:
+    #             sum_valid_points_per_ray = len(value)
+    #             diff = max_valid_points - sum_valid_points_per_ray
+    #             opacity_tabs.extend(opacity[value])
+    #             rgb_tabs.extend(rgb_color[value])
+    #             if diff > 0:
+    #                 opacity_tabs.extend([torch.tensor(0)] * diff)
+    #                 rgb_tabs.extend([torch.zeros(3)] * diff)    
+
+    #     opacity_tabs = torch.stack(opacity_tabs).reshape(N_rays, max_valid_points) # [N_rays, N_samples]
+    #     rgb_tabs = torch.stack(rgb_tabs).reshape(N_rays, -1, 3)       # [N_rays, N_samples, 3]
+
     # print("rgb_tabs ", rgb_tabs.shape, N_rays)
     # print("opacity_tabs ", opacity_tabs.shape, N_rays)
     # print("points_tabs ", points_tabs.shape, N_rays)
 
-    if i_iter%500 == 0:
-        try:
-            plot_selected_points_on_sphere(points_tabs, vertices, faces, 'vertices_' + str(i_iter)+ '.html')
-        except:
-            print("Error during plot selected points on sphere")
+    # if i_iter%500 == 0:
+    # if i_iter == 1:
+    #     try:
+    #         plot_selected_points_on_sphere(points_tabs, vertices, faces, 'hot_dog_' + str(i_iter)+ '.html')
+    #     except:
+    #         print("Error during plot selected points on sphere")
     
     
     rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(opacity_tabs, rgb_tabs, raw_noise_std, white_bkgd, pytest=pytest)
@@ -560,6 +532,27 @@ def render_rays(args,
             print(f"! [Numerical Error] {k} contains nan or inf.")
 
     return ret
+
+
+def save_mesh_as_file(vertices, faces, colors, opacity, filename):
+    mesh = om.TriMesh()
+    vertices = np.array(vertices.detach().numpy())
+    colors = np.array(colors.detach().numpy())
+    opacity = np.array(opacity.detach().numpy())
+    for vertex in vertices:
+        mesh.add_vertex(vertex)
+
+    for face in faces:
+        vertex_handles = [mesh.vertex_handle(idx) for idx in face]
+        mesh.add_face(*vertex_handles)   
+
+    mesh.request_face_colors()
+    for face, color, op in zip(mesh.faces(), colors, opacity):
+        mesh.set_color(face, np.append(color, op))
+
+    om.write_mesh(filename + '.obj', mesh, face_color=True)
+    om.write_mesh(filename + '.ply', mesh, face_color=True)
+
 
 def train():
 
@@ -606,7 +599,7 @@ def train():
             file.write(open(args.config, 'r').read())
 
     # Create model
-    render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer, model = create_nerf(args)
+    render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer, model = create_MeshGS(args)
     global_step = start
 
     bds_dict = {
@@ -645,7 +638,7 @@ def train():
     if use_batching:
         rays_rgb = torch.Tensor(rays_rgb).to(device)
 
-    N_iters = 200000 + 1
+    N_iters = 300000 + 1
     print('Begin')
     print('TRAIN views are', i_train)
     print('TEST views are', i_test)
@@ -707,23 +700,37 @@ def train():
                 target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
 
         #####  Core optimization loop  #####
-        optimizer.zero_grad()
+        # optimizer.zero_grad()
 
         vertices = model.get_vertices()
         faces = model.get_faces()
         opacity = model.get_opacity()
         rgb_color = model.get_rgb_color()
+
+        # print("v", vertices)
+        # print("f", faces)
+        # print("o", opacity)
+        # print("c", rgb_color)
+
+
         
         rgb, disp, acc, extras = render(args, vertices, faces, opacity, rgb_color, i,  H, W, K, chunk=args.chunk, rays=batch_rays,
-                                                verbose=i < 10, retraw=True,
+                                                verbose=i < 10, 
                                                 **render_kwargs_train)
 
 
 
-        
+        # gt_image = target_s.cuda()
+        # image = rgb
+        # lambda_dssim = 0.2
+        # Ll1 = l1_loss(image, gt_image)
+        # img_loss = (1.0 - lambda_dssim) * Ll1 + lambda_dssim * (1.0 - ssim(image, gt_image))
         img_loss = img2mse(rgb, target_s)
+        # img_loss = torch.abs((rgb - target_s)).mean()
+        
         # trans = extras['raw'][...,-1]
         loss = img_loss
+        # print("loss ", img_loss)
         psnr = mse2psnr(img_loss)
 
         if 'rgb0' in extras:
@@ -759,12 +766,17 @@ def train():
         if i%args.i_video==0 and i > 0:
             # Turn on testing mode
             with torch.no_grad():
+                vertices = model.get_vertices()
+                faces = model.get_faces()
+                opacity = model.get_opacity()
+                rgb_color = model.get_rgb_color()
                 rgbs, disps = render_path(args, vertices, faces,  opacity, rgb_color, i,  render_poses, hwf, K, args.chunk, render_kwargs_test)
             print('Done, saving', rgbs.shape, disps.shape)
             moviebase = os.path.join(basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
+            meshbase = os.path.join(basedir, expname, '{}_mesh_{:06d}_'.format(expname, i))
             imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
             imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
-
+            save_mesh_as_file(vertices, faces, rgb_color, opacity, meshbase)
     
         if i%args.i_print==0:
             tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
@@ -773,6 +785,7 @@ def train():
 
 
 if __name__=='__main__':
+ 
     if torch.cuda.is_available():
         torch.set_default_tensor_type('torch.cuda.FloatTensor')
     else:

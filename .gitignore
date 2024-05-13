@@ -161,6 +161,7 @@ cython_debug/
 
 # Dataset
 data/
+hotdog/
 
 #Logs
 logs/

@@ -6,13 +6,10 @@ dataset_type = blender
 half_res = True
 no_batching = True
 
-i_video = 10000
+i_video = 10
 lrate=5e-4
 icosphere=False
-coords=True
-points=2
 
-use_viewdirs = True
 
 white_bkgd = True
 

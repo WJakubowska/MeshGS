@@ -1,10 +1,4 @@
 import torch
-import numpy as np
-import plotly.graph_objects as go
-
-import plotly.io as pio
-from pathlib import Path
-
 
 class Rays:
     def __init__(
