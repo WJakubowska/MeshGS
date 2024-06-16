@@ -17,6 +17,10 @@ class Vertex:
 
     def __eq__(self, other):
         return isinstance(other, Vertex) and (self.x, self.y, self.z) == (other.x, other.y, other.z)
+    
+    def __sub__(self, other):
+        return 
 
     def __hash__(self):
         return hash((self.x, self.y, self.z))
+    

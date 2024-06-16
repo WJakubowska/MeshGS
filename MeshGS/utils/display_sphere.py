@@ -87,15 +87,6 @@ def plot_rays_mesh_and_points(
     )
     data = []
 
-    # pts_on_mesh_sc = [go.Scatter3d(
-    #     x=points[:, 0].detach().cpu().numpy(),
-    #     y=points[:, 1].detach().cpu().numpy(),
-    #     z=points[:, 2].detach().cpu().numpy(),
-    #     mode='markers',
-    #     marker=dict(size=5, color='red'),
-    #     name='pts_on_mesh',
-    # )]
-
     lines = []
     for i in range(len(rays_origins)):
         ray_origin, ray_direction = rays_origins[i], rays_directions[i]

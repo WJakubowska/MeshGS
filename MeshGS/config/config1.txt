@@ -1,15 +1,20 @@
-expname = MeshGS_new
-basedir = ./logs
-datadir = ./data/
+expname = cube_pink_uv
+basedir = ./results/test_uv
+datadir = ./cube/color_pink
 dataset_type = blender
+opacity_noise_std=0
 
 half_res = True
 no_batching = True
-
-i_video = 10
+chunk=32768
+i_print=100
+i_video = 1000
+save_mesh_ply=True
 lrate=5e-4
 icosphere=False
-
+mesh_from_file=True
+mesh_path=./cube/cube.obj
+use_viewdirs=True
 
 white_bkgd = True
 

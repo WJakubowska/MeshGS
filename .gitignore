@@ -162,8 +162,10 @@ cython_debug/
 # Dataset
 data/
 hotdog/
+cube/ 
 
 #Logs
 logs/
+results/
 *.out
 *.sh

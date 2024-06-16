@@ -1,20 +1,22 @@
 import torch
 import trimesh
 import numpy as np
+import torch.nn.functional as F
 from mesh_utils.triangles_utils import  get_triangles_as_indices
 from mesh_utils.icosphere import Icosphere
 from mesh_utils.ball import *
 from mesh_utils.vertex import Vertex
 
 
+
 # Misc
 img2mse = lambda x, y : torch.mean((x - y) ** 2)
 mse2psnr = lambda x : -10. * torch.log(x) / torch.log(torch.Tensor([10.]))
 to8b = lambda x : (255*np.clip(x,0,1)).astype(np.uint8)
+img2BCE = lambda input, target: F.binary_cross_entropy(input, target)
 
 
 # Model
-
 class MeshGS(torch.nn.Module):
     def __init__(self, mesh_icosphere = True, mesh_from_file = False, mesh_path = None):
         super(MeshGS, self).__init__()
@@ -23,41 +25,57 @@ class MeshGS(torch.nn.Module):
         self.vertices = None
         self.faces = None
         self.background = None
+        self.texture = None
         self.opacity_activation = torch.sigmoid
         self.inverse_opacity_activation = self.inverse_sigmoid
         self.mesh_path = mesh_path
+        self.test_mesh = False
+
 
         if mesh_from_file == True:
-            if mesh_path is not None: 
+            if mesh_path is not None:
                 mesh = trimesh.load(mesh_path, force='mesh')
-                vertex_list = []
+                if self.test_mesh:
+                    colors = []
+                    opacity = []
+                    if hasattr(mesh.visual, 'face_colors'):
+                        face_colors = mesh.visual.face_colors
+                        for color in face_colors:
+                            scaled_color = np.array(color[:3]) / 255.0
+                            colors.append(scaled_color)
+                            scaled_opacity = color[3] / 255.0
+                            opacity.append(scaled_opacity)
+                    else:
+                        print("Mesh does not have face colors")
+
+                    colors.append([1, 1, 1])
+                    opacity.append(1)
+                    colors = torch.Tensor(colors)
+                    opacity = torch.Tensor(opacity)
+                    self.rgb_color = torch.nn.Parameter(colors, requires_grad=False)
+                    self.opacity = torch.nn.Parameter(opacity, requires_grad=False)  
+
+                vertices = []
                 for vertex in mesh.vertices:
                     vertex = Vertex(vertex[0], vertex[1], vertex[2])
-                    vertex_list.append(vertex)
-                vertices = vertex_list
-                self.unique_vertices = vertices
-                self.traingles = mesh.faces
+                    vertices.append(vertex)
 
-                
+                self.mesh_vertices = vertices
+                self.mesh_faces = mesh.faces
+              
             else:
                 raise ValueError("Path to mesh file is not provided")
-        else:
-            if mesh_icosphere == True:
-                self.unique_vertices, self.traingles = self.create_mesh_icosphere()
-            else: 
-                self.unique_vertices, self.traingles = self.create_mesh_sphere()
-        
+            
+        self.setup_training_input(self.mesh_vertices, self.mesh_faces)
 
-        self.setup_training_input(self.unique_vertices, self.traingles)
-
-    def create_mesh_icosphere(self, center_point = (0, 0, 0), radius = [2, 1], n_subdivisions = 2):
+    def create_mesh_icosphere(self, center_point = (0, 0, 0), radius = [3], n_subdivisions = 2):
         mesh = Icosphere(n_subdivisions, center_point, radius)
         vertices, triangles = mesh.vertices, mesh.triangles
         unique_vertices = mesh.get_all_vertices()
         triangles = get_triangles_as_indices(unique_vertices, triangles)
         return unique_vertices, triangles
     
-    def create_mesh_sphere(self, n_slices = 10, n_stacks = 10):
+    def create_mesh_sphere(self, n_slices = 22, n_stacks = 18):
         unique_vertices, triangles = uv_sphere(n_slices, n_stacks)
         triangles = get_triangles_as_indices(unique_vertices, triangles)
         return unique_vertices, triangles
@@ -73,27 +91,32 @@ class MeshGS(torch.nn.Module):
     
     def get_rgb_color(self):
         return self.rgb_color
+    
 
     def inverse_sigmoid(self, x):
         return torch.log(x/(1-x))
+    
 
 
-    def setup_training_input(self, unique_vertices, result_triangles):
-        coordinates_list = [(vertex.x, vertex.y, vertex.z) for vertex in unique_vertices]
+    def setup_training_input(self, mesh_vertices, mesh_faces):
+        
+        coordinates_list = [(vertex.x, vertex.y, vertex.z) for vertex in mesh_vertices]
         vertices_tensor = torch.tensor(coordinates_list, dtype=torch.float64, requires_grad=False) 
-        r_triangles = torch.tensor(result_triangles, dtype=torch.float64, requires_grad=False)
-        self.faces = torch.nn.Parameter(r_triangles, requires_grad=False)
-        self.vertices = torch.nn.Parameter(vertices_tensor, requires_grad=False)
-        # self.opacity = torch.nn.Parameter(torch.ones(self.N_rand, self.N_sample), requires_grad=True)
-        # self.rgb_color = torch.nn.Parameter(torch.ones(self.N_rand, self.N_sample, 3), requires_grad=True)
-        self.opacity = torch.nn.Parameter(torch.zeros(r_triangles.shape[0] + 1), requires_grad=True)
-        self.rgb_color = torch.nn.Parameter(torch.zeros(r_triangles.shape[0] + 1, 3), requires_grad=True)
+        r_triangles = torch.tensor(mesh_faces, dtype=torch.float64, requires_grad=False)
 
-        print("File name: ", self.mesh_path)
-        print("Vertices: ", self.vertices.shape)
-        print("Triangles: ", self.faces.shape)
-        print("Opacity: ", self.opacity.shape)
-        print("RGB: ", self.rgb_color.shape)
+        
+        self.faces = torch.nn.Parameter(r_triangles, requires_grad=False)
+        self.vertices = torch.nn.Parameter(vertices_tensor, requires_grad=False)       
+        
+     
+        self.opacity = torch.nn.Parameter(self.inverse_sigmoid(0.1 * torch.ones(r_triangles.shape[0]+1)), requires_grad=True)
+        self.rgb_color = torch.nn.Parameter(torch.abs(torch.normal(0, 0.1, size=(r_triangles.shape[0]+1, 3))), requires_grad=True)
+        self.texture = torch.nn.Parameter(torch.zeros(r_triangles.shape[0], 8, 8), requires_grad= True)
+        print("Mesh path: ", self.mesh_path)
+        print("Vertices shape: ", self.vertices.shape)
+        print("Triangles shape: ", self.faces.shape)
+        print("Opacity shape: ", self.opacity.shape)
+        print("RGB shape: ", self.rgb_color.shape)
 
 
 

@@ -2,7 +2,6 @@ from utils.display_sphere import *
 from load_blender import load_blender_data
 from run_meshGS_helpers import *
 from tqdm import tqdm, trange
-import openmesh as om
 import torch 
 import numpy as np
 import os
@@ -12,6 +11,7 @@ import torch.nn.functional as F
 import configargparse
 import time
 import trimesh
+import matplotlib.pyplot as plt
 from collections import defaultdict
 
 def config_parser():
@@ -44,8 +44,8 @@ def config_parser():
     # rendering options
     parser.add_argument("--use_viewdirs", action='store_true', 
                         help='use full 5D input instead of 3D')
-    parser.add_argument("--raw_noise_std", type=float, default=0., 
-                        help='std dev of noise added to regularize sigma_a output, 1e0 recommended')
+    parser.add_argument("--opacity_noise_std", type=float, default=0., 
+                        help='std dev of noise added to regularize opacity output, 1e0 recommended')
 
     parser.add_argument("--render_test", action='store_true', 
                         help='render the test set instead of render_poses path')
@@ -59,14 +59,10 @@ def config_parser():
                         default=.5, help='fraction of img taken for central crops') 
 
     # dataset options
-    parser.add_argument("--dataset_type", type=str, default='llff', 
-                        help='options: llff / blender / deepvoxels')
+    parser.add_argument("--dataset_type", type=str, default='blender', 
+                        help='options: blender')
     parser.add_argument("--testskip", type=int, default=8, 
                         help='will load 1/N images from test/val sets, useful for large datasets like deepvoxels')
-
-    ## deepvoxels flags
-    parser.add_argument("--shape", type=str, default='greek', 
-                        help='options : armchair / cube / greek / vase')
 
     ## blender flags
     parser.add_argument("--white_bkgd", action='store_true', 
@@ -75,28 +71,26 @@ def config_parser():
                         help='load blender synthetic data at 400x400 instead of 800x800')
 
     ## llff flags
-    parser.add_argument("--factor", type=int, default=8, 
-                        help='downsample factor for LLFF images')
     parser.add_argument("--no_ndc", action='store_true', 
                         help='do not use normalized device coordinates (set for non-forward facing scenes)')
-
-
 
     # logging/saving options
     parser.add_argument("--i_print",   type=int, default=100, 
                         help='frequency of console printout and metric loggin')
-    parser.add_argument("--i_img",     type=int, default=500, 
-                        help='frequency of tensorboard image logging')
     parser.add_argument("--i_video",   type=int, default=10000, 
                         help='frequency of render_poses video saving')
     
-    # ray tracking options
+    # mesh options
     parser.add_argument("--icosphere", action='store_true', 
                         help='if true, the sphere is an isosphere, if false, the sphere is a sphere')
-    parser.add_argument("--coords", action='store_true', 
-                        help='if true, barycentric coordinates are used for rendering')    
+    parser.add_argument("--mesh_from_file", action='store_true',
+                        help='if true, mesh is load from file')
+    parser.add_argument("--mesh_path", type=str,
+                        help='specific mesh .ply or .obj file')
+    
+    parser.add_argument("--save_mesh_ply", action='store_true', 
+                        help='if true, the mesh is save as ply after render')
   
-
 
     return parser
 
@@ -106,16 +100,17 @@ def config_parser():
 ################################### Traing with NeRF ############################################################################
 #################################################################################################################################
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cpu")
 np.random.seed(0)
 DEBUG = False
 
-def batchify_rays(args, vertices, faces,  opacity, rgb_color, i_iter,  rays_flat, chunk=1024*32, **kwargs):
+def batchify_rays(vertices, faces,  opacity, rgb_color, i_iter,  rays_flat, chunk=1024*32, **kwargs):
     """Render rays in smaller minibatches to avoid OOM.
     """
     all_ret = {}
     for i in range(0, rays_flat.shape[0], chunk):
-        ret = render_rays(args, vertices, faces,  opacity, rgb_color, i_iter,  rays_flat[i:i+chunk], **kwargs)
+        ret = render_rays(vertices, faces,  opacity, rgb_color, i_iter,  rays_flat[i:i+chunk], **kwargs)
         for k in ret:
             if k not in all_ret:
                 all_ret[k] = []
@@ -125,7 +120,7 @@ def batchify_rays(args, vertices, faces,  opacity, rgb_color, i_iter,  rays_flat
     return all_ret
 
 
-def render(args, vertices, faces, opacity, rgb_color, i_iter,  H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
+def render(vertices, faces, opacity, rgb_color, i_iter,  H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
                   near=0., far=1.,
                   use_viewdirs=False, c2w_staticcam=None,
                   **kwargs):
@@ -155,7 +150,6 @@ def render(args, vertices, faces, opacity, rgb_color, i_iter,  H, W, K, chunk=10
       extras: dict with everything returned by render_rays().
     """
     if c2w is not None:
-        # special case to render full image
         rays_o, rays_d = get_rays(H, W, K, c2w)
     else:
         # use provided ray batch
@@ -185,7 +179,7 @@ def render(args, vertices, faces, opacity, rgb_color, i_iter,  H, W, K, chunk=10
         rays = torch.cat([rays, viewdirs], -1)
 
     # Render and reshape
-    all_ret = batchify_rays(args, vertices, faces, opacity, rgb_color, i_iter, rays, chunk, **kwargs)
+    all_ret = batchify_rays(vertices, faces, opacity, rgb_color, i_iter, rays, chunk, **kwargs)
 
     for k in all_ret:
         k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
@@ -198,7 +192,7 @@ def render(args, vertices, faces, opacity, rgb_color, i_iter,  H, W, K, chunk=10
     return ret_list + [ret_dict]
 
 
-def render_path(args, vertices, faces, opacity, rgb_color, i_iter,  render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
+def render_path(vertices, faces, opacity, rgb_color, i_iter,  render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
 
     H, W, focal = hwf
 
@@ -210,25 +204,22 @@ def render_path(args, vertices, faces, opacity, rgb_color, i_iter,  render_poses
 
     rgbs = []
     disps = []
+    accs = []
 
     t = time.time()
     for i, c2w in enumerate(tqdm(render_poses)):
-        rgb, disp, acc, _ = render(args, vertices, faces,  opacity, rgb_color, i_iter,  H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
-        rgbs.append(rgb.cpu().numpy())
-        disps.append(disp.cpu().numpy())
+        rgb, disp, acc, _ = render(vertices, faces,  opacity, rgb_color, i_iter,  H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
+        rgbs.append(rgb.numpy())
+        disps.append(disp.numpy())
+        accs.append(acc.numpy())
         if i==0:
-            print(rgb.shape, disp.shape)
+            print(f"rgb_shape: {rgb.shape}, disp_shape: {disp.shape}, acc_shape: {acc.shape}")
 
         """
         if gt_imgs is not None and render_factor==0:
             p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i])))
             print(p)
         """
-
-        if savedir is not None:
-            rgb8 = to8b(rgbs[-1])
-            filename = os.path.join(savedir, '{:03d}.png'.format(i))
-            imageio.imwrite(filename, rgb8)
 
 
     rgbs = np.stack(rgbs, 0)
@@ -239,10 +230,9 @@ def render_path(args, vertices, faces, opacity, rgb_color, i_iter,  render_poses
 
 def create_MeshGS(args):
 
-    model = MeshGS(mesh_icosphere = args.icosphere, mesh_from_file=False, mesh_path='./data1/mesh_test.ply').to(device)
+    model = MeshGS(mesh_icosphere = args.icosphere, mesh_from_file=args.mesh_from_file, mesh_path=args.mesh_path).to(device)
 
     grad_vars = list(model.parameters())
-    model_fine = None
 
     # Create optimizer
     optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
@@ -254,7 +244,7 @@ def create_MeshGS(args):
     render_kwargs_train = {
         'use_viewdirs' : args.use_viewdirs,
         'white_bkgd' : args.white_bkgd,
-        'raw_noise_std' : args.raw_noise_std,
+        'opacity_noise_std' : args.opacity_noise_std,
     }
 
     # NDC only good for LLFF-style forward facing data
@@ -263,9 +253,50 @@ def create_MeshGS(args):
         render_kwargs_train['ndc'] = False
 
     render_kwargs_test = {k : render_kwargs_train[k] for k in render_kwargs_train}
-    render_kwargs_test['raw_noise_std'] = 0.
+    render_kwargs_test['opacity_noise_std'] = 0.
 
     return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer, model
+
+def normalize(v):
+        return v / torch.norm(v)
+
+def calculate_uv(mesh_vertices, mesh_faces):
+        vertices = mesh_vertices
+        faces = mesh_faces
+        uv_coords = []
+
+        for face in faces: 
+            v0 = vertices[face[0]]
+            v1 = vertices[face[1]]
+            v2 = vertices[face[2]]
+
+            edge1 = torch.tensor([v1.x - v0.x, v1.y - v0.y, v1.z - v0.z])
+            edge2 = torch.tensor([v2.x - v0.x, v2.y - v0.y, v2.z - v0.z])
+            n = normalize(torch.cross(edge1, edge2))
+            
+            if n[0] != 0 and n[1] != 0:
+                a = n[1]
+                b = -n[0]
+                c = 0
+            else:
+                a = n[2]
+                b = 0
+                c = -n[1]
+
+            u = normalize(torch.tensor([b, -a, 0.]))
+            v = torch.cross(n, u)
+            uv_coords.append(torch.stack([u, v]))
+
+        return torch.stack(uv_coords)
+
+# def check_barycentric_coordinates(u, v, w):
+#     if u >= 0 and v >= 0 and w >= 0:
+#         if abs(u + v + w - 1.0) < 1e-6:
+#             return True 
+#         else:
+#             raise ValueError("Sum of barycentric coordinates u + v + w must equal 1")
+#     else:
+#         raise ValueError("Barycentric coordinates u, v, w must be non-negative")
 
 
 def calculate_barycentric_coordinates(point, vertices_A, vertices_B, vertices_C):
@@ -274,59 +305,38 @@ def calculate_barycentric_coordinates(point, vertices_A, vertices_B, vertices_C)
         v1 = vertices_C - vertices_A
         v2 = point - vertices_A
         
-        d00 = torch.sum(v0 * v0, dim=1) # torch.dot() - iloczyn skalarny
-        d01 = torch.sum(v0 * v1, dim=1) # (X*Y).sum(axis = 1) == torch.tensor([torch.dot(X[0], Y[0]),torch.dot(X[1], Y[1])])
-        d11 = torch.sum(v1 * v1, dim=1)
-        d20 = torch.sum(v2 * v0, dim=1)
-        d21 = torch.sum(v2 * v1, dim=1)
+        d00 = torch.dot(v0, v0)
+        d01 = torch.dot(v0, v1)
+        d11 = torch.dot(v1, v1)
+        d20 = torch.dot(v2, v0)
+        d21 = torch.dot(v2, v1)
         denom = d00 * d11 - d01 * d01
         v = (d11 * d20 - d01 * d21) / denom
         w = (d00 * d21 - d01 * d20) / denom
         u = 1.0 - v - w
+        # check_barycentric_coordinates(u, v, w)
         return u, v, w
 
 
-def check_if_point_is_in_triangle(point, vertices_A, vertices_B, vertices_C):
-    u, v, w = calculate_barycentric_coordinates(point, vertices_A, vertices_B, vertices_C)
-    mask = (v >= 0) & (w >= 0) & (u >= 0) & (v + w + u <= 1)
-    if mask.any():
-        idx = torch.nonzero(mask)[0]
-        return u[idx] *  vertices_A[idx] + v[idx] * vertices_B[idx] + w[idx] * vertices_C[idx]
-    
-    return torch.empty(0)
 
-
-def find_barycentric_coordinates(points, vertices, faces, opacity, rgb_color):
-    N_rays, N_samples, _ = points.shape
-    opacity_tabs = []
-    rgb_tabs = []
-    A = vertices[faces[:, 0]]
-    B = vertices[faces[:, 1]]
-    C = vertices[faces[:, 2]]
-    points = points.view(-1, 3)
-    for point in points:
-            idx = check_if_point_is_in_triangle(point, A, B, C)
-            if idx is not torch.empty(0):
-                opacity_tabs.append(opacity[idx])
-                rgb_tabs.append(rgb_color[idx])
-                # print("opa:, " , opacity_tabs[0].shape)
-                # print("rgb:, " , rgb_tabs[0].shape)
-            else:
-                assert False, "Triangle not found for point"
-    opacity_tabs = torch.stack(opacity_tabs)
-    opacity_tabs = opacity_tabs.view(N_rays, N_samples)
-    rgb_tabs = torch.stack(rgb_tabs)
-    rgb_tabs = rgb_tabs.view(N_rays, N_samples, 3)
-    return opacity_tabs, rgb_tabs 
+def find_uv_coordinates(points, faces_indices, faces, vertices):
+    uv_coords = []
+    for point, face_idx in zip(points, faces_indices):
+        face = faces[face_idx]
+        face = face.long()
+        A = vertices[face[0]]
+        B = vertices[face[1]]
+        C = vertices[face[2]]
+        u, v, w = calculate_barycentric_coordinates(torch.tensor(point), A, B, C)
+        uv_coords.append(torch.tensor([u, v]))
+    return torch.stack(uv_coords)
 
 
 
-def raw2outputs(opacity_tabs, rgb_tabs, raw_noise_std=0, white_bkgd=False, pytest=False):
+
+
+def raw2outputs(N_rays, opacity_tabs, rgb_tabs, uv_coords, opacity_noise_std=0, white_bkgd=False, pytest=False):
     """Transforms model's predictions to semantically meaningful values.
-    Args:
-        raw: [num_rays, num_samples along ray, 4]. Prediction from model.
-        z_vals: [num_rays, num_samples along ray]. Integration time.
-        rays_d: [num_rays, 3]. Direction of each ray.
     Returns:
         rgb_map: [num_rays, 3]. Estimated RGB color of a ray.
         disp_map: [num_rays]. Disparity map. Inverse of depth map.
@@ -334,33 +344,38 @@ def raw2outputs(opacity_tabs, rgb_tabs, raw_noise_std=0, white_bkgd=False, pytes
         weights: [num_rays, num_samples]. Weights assigned to each sampled color.
         depth_map: [num_rays]. Estimated distance to object.
     """
-      # faces = faces.long()
-    # # raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
     raw2alpha = lambda raw, act_fn=F.sigmoid: act_fn(raw)
-    # num_rays, num_samples = raw.shape[:2]
+
+    if rgb_tabs != [] and opacity_tabs != []:
+   
+        rgb = torch.sigmoid(rgb_tabs)  # [N_rays, N_samples, 3]
+        uv_coords = uv_coords.unsqueeze(0).float()
+        image = rgb.unsqueeze(0).permute(0, 3, 1, 2).float()
+        # print(uv_coords.shape, image.shape, image.permute(0, 3, 1, 2).shape)
+        sampled_color = F.grid_sample(image, uv_coords, align_corners=True)  
+        # print(sampled_color, sampled_color.permute(2, 3, 1, 0).squeeze().shape)
+        rgb = sampled_color.permute(2, 3, 1, 0).squeeze()
 
 
-    rgb = torch.sigmoid(rgb_tabs) # jak sigmoid to zera w dodawaniu pkt  # [N_rays, N_samples, 3]
-    # rgb = rgb_tabs
+        noise = 0.
+        if opacity_noise_std > 0.:
+            noise = noise = torch.randn(opacity_tabs.shape) * opacity_noise_std
+    
+        alpha = raw2alpha(opacity_tabs + noise) # [N_rays, N_samples]
+    
+    else:
+        rgb = torch.ones(N_rays, 1, 3)
+        alpha = torch.ones(N_rays, 1)
 
-    # noise = 0.
-    # if raw_noise_std > 0.:
-    #     noise = torch.randn(raw[...,3].shape) * raw_noise_std
-
-
-    # alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
-
-    # rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
-    # noise = 0.
-    # if raw_noise_std > 0.:
-        # noise = torch.randn(raw[...,3].shape) * raw_noise_std
-
-
-    # alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
-    alpha = raw2alpha(opacity_tabs)
     
     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
     rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
+
+    sum_weights = torch.sum(weights, dim=1)
+    sum_weights_equal_to_one = torch.allclose(sum_weights, torch.ones_like(sum_weights), atol=1e-6)
+
+    if sum_weights_equal_to_one == True:
+        print(" Sum weights equal to one")
 
     depth_map = torch.sum(weights, -1) 
     disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
@@ -373,17 +388,51 @@ def raw2outputs(opacity_tabs, rgb_tabs, raw_noise_std=0, white_bkgd=False, pytes
 
 
 
+def sort_faces_along_the_ray_by_distance(points, index_ray, index_tri, rays_o):
+    intersections_by_ray = defaultdict(list)
+    # calculate distance
+    for point, ray_idx, tri_idx in zip(points, index_ray, index_tri):
+        distance = torch.linalg.norm(torch.tensor(point) - rays_o[ray_idx])
+        intersections_by_ray[ray_idx].append((distance, tri_idx, point))   
+    #sort by distance
+    for ray_idx in intersections_by_ray:
+        intersections_by_ray[ray_idx].sort(key=lambda x: x[0])
+
+    return intersections_by_ray
 
 
-def render_rays(args,
-                vertices, 
+
+def map_ray_to_intersections(intersections_by_ray, N_rays):
+    intersects_faces_dict = defaultdict(list) # {ray_idx}: [face_idx]
+    intersects_points_dict = defaultdict(list)
+
+    for ray_index in intersections_by_ray:
+        sorted_face_indices = [face_idx for distance, face_idx, point in intersections_by_ray[ray_index]]
+        sorted_point = [point for distance, face_idx, point in intersections_by_ray[ray_index]]
+        intersects_faces_dict[ray_index] = sorted_face_indices
+        intersects_points_dict[ray_index] = sorted_point
+
+    intersects_faces_dict  = dict(intersects_faces_dict)
+    additional_keys = {key: None for key in range(N_rays) if key not in intersects_faces_dict}
+    intersects_faces_dict.update(additional_keys)
+    intersects_faces_dict = dict(sorted(intersects_faces_dict.items()))
+
+    intersects_points_dict = dict(intersects_points_dict)
+    intersects_points_dict.update(additional_keys)
+    intersects_points_dict = dict(sorted(intersects_points_dict.items()))
+
+
+    return intersects_faces_dict, intersects_points_dict 
+
+
+def render_rays(vertices, 
                 faces,
                 opacity, 
                 rgb_color,
                 i_iter,
                 ray_batch,
                 white_bkgd=False,
-                raw_noise_std=0.,
+                opacity_noise_std=0.,
                 verbose=False,
                 pytest=False):
     """Volumetric rendering.
@@ -395,7 +444,7 @@ def render_rays(args,
         for sampling along a ray, including: ray origin, ray direction, min
         dist, max dist, and unit-magnitude viewing direction.
       white_bkgd: bool. If True, assume a white background.
-      raw_noise_std: ...
+      opacity_noise_std: ...
       verbose: bool. If True, print more debugging info.
     Returns:
       rgb_map: [num_rays, 3]. Estimated RGB color of a ray. Comes from fine model.
@@ -406,60 +455,62 @@ def render_rays(args,
       disp0: See disp_map. Output for coarse model.
       acc0: See acc_map. Output for coarse model.
     """
-    # pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
+    # pts [N_rays, N_samples, 3]
 
-    opacity_tabs, rgb_tabs = [], []
+    opacity_tabs, rgb_tabs, uv_coords = [], [], []
     N_rays = ray_batch.shape[0]
-    
     rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each
    
-   
-    mesh = trimesh.Trimesh(vertices=vertices.cpu(), faces=faces.cpu())
-    points, index_ray, index_tri = mesh.ray.intersects_location(ray_origins=rays_o.cpu(), ray_directions=rays_d.cpu())
+    # Ray tracking
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+    points, index_ray, index_tri = mesh.ray.intersects_location(ray_origins=rays_o, ray_directions=rays_d)
     assert isinstance(mesh.ray, trimesh.ray.ray_pyembree.RayMeshIntersector), "The mesh doesn't use pyembree."
 
-    ray_to_tri_dict = defaultdict(list)
-    for ray_index, tri_value in zip(index_ray, index_tri):
-        ray_to_tri_dict[ray_index].append(tri_value)
-    ray_to_tri_dict = dict(ray_to_tri_dict)
-    additional_keys = {key: None for key in range(N_rays) if key not in ray_to_tri_dict}
-    ray_to_tri_dict.update(additional_keys)
+    # Sort faces along the ray by distance
+    intersections_by_ray = sort_faces_along_the_ray_by_distance(points, index_ray, index_tri, rays_o)
 
+    # Create a dictionary {index_ray} : [faces_indices], {index_ray}: [points]
+    # which maps each ray to the indices of the faces it intersects. If there are no intersections, assign None.
+    intersects_faces_dict, intersects_points_dict = map_ray_to_intersections(intersections_by_ray, N_rays)
+
+    # Assigning color and transparency to the intersected face
+    
+    # Case 1: Rays don't intersect the mesh anywhere
     if len(points) == 0:
-        opacity_tabs = torch.tensor([opacity[-1] for _ in range(N_rays)]).unsqueeze(1) # [N_rays, 1]
-        rgb_tabs =  rgb_color[-1].repeat(N_rays, 1, 1) # [N_rays, 1,  3] 
-
+        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(N_rays, opacity_tabs, rgb_tabs, opacity_noise_std, white_bkgd, pytest=pytest)
+    
+    # Case 2: Some rays intersected the mesh
     else:
         unique_values, counts = np.unique(index_ray, return_counts=True)
         max_valid_points = max(counts)
 
-        for value in ray_to_tri_dict.values():
-            if value == None:
-                opacity_tabs.extend([opacity[-1]] * max_valid_points) 
-                rgb_tabs.extend([rgb_color[-1]] * max_valid_points)
+        for index_ray, faces_indices in intersects_faces_dict.items():
+            if faces_indices == None:
+                opacity_tabs.extend([torch.tensor(1)] * max_valid_points) 
+                rgb_tabs.extend([torch.ones(3)]  * max_valid_points)
+                uv_coords.extend([torch.zeros(2)] * max_valid_points)
             else:
-                sum_valid_points_per_ray = len(value)
+                sum_valid_points_per_ray = len(faces_indices)
                 diff = max_valid_points - sum_valid_points_per_ray
-                opacity_tabs.extend(opacity[value])
-                rgb_tabs.extend(rgb_color[value])
+                opacity_tabs.extend(opacity[faces_indices])
+                rgb_tabs.extend(rgb_color[faces_indices])
+                points = intersects_points_dict[index_ray]
+                uv = find_uv_coordinates(points, faces_indices, faces, vertices)
+                assert rgb_color[faces_indices].shape[0] == uv.shape[0]
+                uv_coords.extend(uv)
                 if diff > 0:
-                    opacity_tabs.extend([torch.tensor(0)] * diff)
-                    rgb_tabs.extend([torch.zeros(3)] * diff)    
-
+                    opacity_tabs.extend([torch.tensor(1)] * diff)
+                    rgb_tabs.extend([torch.ones(3)] * diff)
+                    uv_coords.extend([torch.zeros(2)] * diff)  
+        
         opacity_tabs = torch.stack(opacity_tabs).reshape(N_rays, max_valid_points) # [N_rays, N_samples]
         rgb_tabs = torch.stack(rgb_tabs).reshape(N_rays, -1, 3)       # [N_rays, N_samples, 3]
-
-
-
-    # if i_iter%500 == 0:
-    # if i_iter == 1:
-    #     try:
-    #         plot_selected_points_on_sphere(points_tabs, vertices, faces, 'hot_dog_' + str(i_iter)+ '.html')
-    #     except:
-    #         print("Error during plot selected points on sphere")
+        uv_coords = torch.stack(uv_coords).reshape(N_rays, -1, 2)  #[N_rays, N_samples, 2]
+        
+        # rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(N_rays,opacity_tabs, rgb_tabs, opacity_noise_std, white_bkgd, pytest=pytest)
+ 
     
-    
-    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(opacity_tabs, rgb_tabs, raw_noise_std, white_bkgd, pytest=pytest)
+    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(N_rays, opacity_tabs, rgb_tabs, uv_coords, opacity_noise_std, white_bkgd, pytest=pytest)
 
     ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map}
     for k in ret:
@@ -469,36 +520,45 @@ def render_rays(args,
     return ret
 
 
-def save_mesh_as_file(vertices, faces, colors, opacity, filename):
-    mesh = om.TriMesh()
-    vertices = np.array(vertices.detach().cpu().numpy())
-    colors = np.array(colors.detach().cpu().numpy())
-    opacity = np.array(opacity.detach().cpu().numpy())
-    for vertex in vertices:
-        mesh.add_vertex(vertex)
 
-    for face in faces:
-        vertex_handles = [mesh.vertex_handle(idx) for idx in face]
-        mesh.add_face(*vertex_handles)   
-
-    mesh.request_face_colors()
-    for face, color, op in zip(mesh.faces(), colors, opacity):
-        mesh.set_color(face, np.append(color, op))
-
-    om.write_mesh(filename + '.obj', mesh, face_color=True)
-    om.write_mesh(filename + '.ply', mesh, face_color=True)
+def save_mesh_as_file(vertices, faces, rgb_color, opacity, meshbase):
+    rgb_color = torch.sigmoid(rgb_color).detach().numpy()
+    opacity = torch.sigmoid(opacity).detach().numpy()
+    rgb_color = (rgb_color * 255).astype(np.uint8)
+    colors_with_opacity = np.concatenate((rgb_color, opacity.reshape(-1, 1)), axis=1)
+    mesh = trimesh.Trimesh(vertices=vertices.detach().numpy(), faces=faces.detach().numpy(), face_colors=colors_with_opacity[:-1])
+    mesh.export(meshbase + '.ply')
 
 
 
+def plot_loss_psnr(basedir, expname, loss_tab, psnr_tab, iter_tab, loss, psnr, iter):
+    loss_tab.append(loss)
+    psnr_tab.append(psnr)
+    iter_tab.append(iter)
+    labels = ['Loss', 'PSNR']
+    values = [loss_tab, psnr_tab]
+    colors = ['orange', 'green']
+
+    for value, label, color in zip(values, labels, colors):
+        plt.figure()
+        plt.plot(iter_tab, value, label=label, color=color, linewidth=2)
+        plt.xlabel("Epoch")
+        plt.legend()
+        plt.savefig(os.path.join(basedir, expname, 'plot_' + label.lower() + '.png'))
+    plt.close('all')
 
 def train():
+
+    loss_tab = []
+    psnr_tab = []
+    iter_tab = []
 
     parser = config_parser()
     args = parser.parse_args()
 
     # Load Blender data
-    images, poses, render_poses, hwf, i_split = load_blender_data(args.datadir, args.half_res, args.testskip)
-    print('Loaded blender', images.shape, render_poses.shape, hwf, args.datadir)
+    images, poses, render_poses, hwf, i_split, acc_gt = load_blender_data(args.datadir, args.half_res, args.testskip)
+    print('Loaded blender', images.shape, render_poses.shape, acc_gt.shape, hwf, args.datadir)
     i_train, i_val, i_test = i_split
     near = 2.
     far = 6.
@@ -546,7 +606,7 @@ def train():
     render_kwargs_train.update(bds_dict)
     render_kwargs_test.update(bds_dict)
 
-    # Move testing data to GPU
+    # Move testing data to device
     render_poses = torch.Tensor(render_poses).to(device)
 
     # Prepare raybatch tensor if batching random rays
@@ -568,7 +628,7 @@ def train():
         print('done')
         i_batch = 0
 
-    # Move training data to GPU
+    # Move training data to device
     if use_batching:
         images = torch.Tensor(images).to(device)
     poses = torch.Tensor(poses).to(device)
@@ -609,7 +669,9 @@ def train():
             # Random from one image
             img_i = np.random.choice(i_train)
             target = images[img_i]
+            acc_target = acc_gt[img_i]
             target = torch.Tensor(target).to(device)
+            acc_target = torch.Tensor(acc_target).to(device)
             pose = poses[img_i, :3,:4]
 
             if N_rand is not None:
@@ -635,27 +697,27 @@ def train():
                 rays_d = rays_d[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
                 batch_rays = torch.stack([rays_o, rays_d], 0)
                 target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
+                acc_target_s = acc_target[select_coords[:, 0], select_coords[:, 1]]
 
         #####  Core optimization loop  #####
-        optimizer.zero_grad()
+        # optimizer.zero_grad()
 
         vertices = model.get_vertices()
         faces = model.get_faces()
         opacity = model.get_opacity()
         rgb_color = model.get_rgb_color()
 
-        rgb, disp, acc, extras = render(args, vertices, faces, opacity, rgb_color, i,  H, W, K, chunk=args.chunk, rays=batch_rays,
+        
+        rgb, disp, acc, extras = render(vertices, faces, opacity, rgb_color, i,  H, W, K, chunk=args.chunk, rays=batch_rays,
                                                 verbose=i < 10,
                                                 **render_kwargs_train)
 
 
 
-
         img_loss = img2mse(rgb, target_s)
-        # img_loss = torch.abs((rgb - target_s)).mean()
-        
-        loss = img_loss
-        # print("loss ", img_loss)
+        mask_loss = img2BCE(torch.clamp(acc, min=0., max=1.), acc_target_s.float())
+        loss = img_loss + mask_loss
+        # loss = img_loss
         psnr = mse2psnr(img_loss)
 
         if 'rgb0' in extras:
@@ -695,30 +757,25 @@ def train():
                 faces = model.get_faces()
                 opacity = model.get_opacity()
                 rgb_color = model.get_rgb_color()
-                rgbs, disps = render_path(args, vertices, faces,  opacity, rgb_color, i,  render_poses, hwf, K, args.chunk, render_kwargs_test)
+                rgbs, disps = render_path(vertices, faces,  opacity, rgb_color, i,  render_poses, hwf, K, args.chunk, render_kwargs_test)
+
 
             print('Done, saving', rgbs.shape, disps.shape)
             moviebase = os.path.join(basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
-            meshbase = os.path.join(basedir, expname, '{}_mesh_{:06d}_'.format(expname, i))
+            meshbase = os.path.join(basedir, expname, '{}_mesh_{:06d}'.format(expname, i))
             imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
-            imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
-            try:
+            # imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
+            if args.save_mesh_ply == True:
                 save_mesh_as_file(vertices, faces, rgb_color, opacity, meshbase)
-            except:
-                print("Save mesh failed")
 
     
         if i%args.i_print==0:
+            plot_loss_psnr(basedir, expname, loss_tab, psnr_tab, iter_tab, loss.item(), psnr.item(), i)
             tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
 
         global_step += 1
 
 
 if __name__=='__main__':
- 
-    if torch.cuda.is_available():
-        torch.set_default_tensor_type('torch.cuda.FloatTensor')
-    else:
-        torch.set_default_tensor_type('torch.FloatTensor')
-
+    torch.set_default_device("cpu")
     train()
