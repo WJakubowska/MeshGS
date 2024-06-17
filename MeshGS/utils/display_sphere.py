@@ -87,15 +87,6 @@ def plot_rays_mesh_and_points(
     )
     data = []
 
-    pts_on_mesh_sc = [go.Scatter3d(
-        x=points[:, 0].detach().cpu().numpy(),
-        y=points[:, 1].detach().cpu().numpy(),
-        z=points[:, 2].detach().cpu().numpy(),
-        mode='markers',
-        marker=dict(size=5, color='red'),
-        name='pts_on_mesh',
-    )]
-
     lines = []
     for i in range(len(rays_origins)):
         ray_origin, ray_direction = rays_origins[i], rays_directions[i]
@@ -105,7 +96,7 @@ def plot_rays_mesh_and_points(
             y=[ray_origin[1], ray_end[1]],
             z=[ray_origin[2], ray_end[2]],
             mode='lines',
-            line=dict(width=3, color='blue'),
+            line=dict(width=0.5, color='blue'),
             name=f'Ray_{i}'
         ))
 
@@ -125,14 +116,14 @@ def plot_rays_mesh_and_points(
             )
         )
 
-    data = data + triangles + pts_on_mesh_sc
-
+    # data = data + triangles + pts_on_mesh_sc
+    data = data + triangles
     fig = go.Figure(
         data=data,
         layout=layout
     )
 
-    save_plot_as_html('mesh_with_ray.html', fig)
+    save_plot_as_html('RAY.html', fig)
 
 def plot_selected_points_on_sphere(selected_pts, vertices, triangles, name='selected_points.html'):
     fig = go.Figure()

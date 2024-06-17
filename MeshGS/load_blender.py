@@ -64,6 +64,7 @@ def load_blender_data(basedir, half_res=False, testskip=1):
         counts.append(counts[-1] + imgs.shape[0])
         all_imgs.append(imgs)
         all_poses.append(poses)
+        
     
     i_split = [np.arange(counts[i], counts[i+1]) for i in range(3)]
     
@@ -81,11 +82,12 @@ def load_blender_data(basedir, half_res=False, testskip=1):
         W = W//2
         focal = focal/2.
 
-        imgs_half_res = np.zeros((imgs.shape[0], H, W, 3))
+        imgs_half_res = np.zeros((imgs.shape[0], H, W, 4))
         for i, img in enumerate(imgs):
             imgs_half_res[i] = cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA)
         imgs = imgs_half_res
         # imgs = tf.image.resize_area(imgs, [400, 400]).numpy()
-
+    
+    acc_gt = imgs[..., -1]
         
-    return imgs, poses, render_poses, [H, W, focal], i_split
+    return imgs, poses, render_poses, [H, W, focal], i_split, acc_gt 
