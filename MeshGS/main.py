@@ -81,8 +81,6 @@ def config_parser():
                         help='frequency of render_poses video saving')
     
     # mesh options
-    parser.add_argument("--icosphere", action='store_true', 
-                        help='if true, the sphere is an isosphere, if false, the sphere is a sphere')
     parser.add_argument("--mesh_from_file", action='store_true',
                         help='if true, mesh is load from file')
     parser.add_argument("--mesh_path", type=str,
@@ -105,12 +103,12 @@ device = torch.device("cpu")
 np.random.seed(0)
 DEBUG = False
 
-def batchify_rays(vertices, faces,  opacity, rgb_color, i_iter,  rays_flat, chunk=1024*32, **kwargs):
+def batchify_rays(vertices, faces,  opacity, texture, i_iter,  rays_flat, chunk=1024*32, **kwargs):
     """Render rays in smaller minibatches to avoid OOM.
     """
     all_ret = {}
     for i in range(0, rays_flat.shape[0], chunk):
-        ret = render_rays(vertices, faces,  opacity, rgb_color, i_iter,  rays_flat[i:i+chunk], **kwargs)
+        ret = render_rays(vertices, faces,  opacity, texture, i_iter,  rays_flat[i:i+chunk], **kwargs)
         for k in ret:
             if k not in all_ret:
                 all_ret[k] = []
@@ -120,7 +118,7 @@ def batchify_rays(vertices, faces,  opacity, rgb_color, i_iter,  rays_flat, chun
     return all_ret
 
 
-def render(vertices, faces, opacity, rgb_color, i_iter,  H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
+def render(vertices, faces, opacity, texture, i_iter,  H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
                   near=0., far=1.,
                   use_viewdirs=False, c2w_staticcam=None,
                   **kwargs):
@@ -179,7 +177,7 @@ def render(vertices, faces, opacity, rgb_color, i_iter,  H, W, K, chunk=1024*32,
         rays = torch.cat([rays, viewdirs], -1)
 
     # Render and reshape
-    all_ret = batchify_rays(vertices, faces, opacity, rgb_color, i_iter, rays, chunk, **kwargs)
+    all_ret = batchify_rays(vertices, faces, opacity, texture, i_iter, rays, chunk, **kwargs)
 
     for k in all_ret:
         k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
@@ -192,7 +190,7 @@ def render(vertices, faces, opacity, rgb_color, i_iter,  H, W, K, chunk=1024*32,
     return ret_list + [ret_dict]
 
 
-def render_path(vertices, faces, opacity, rgb_color, i_iter,  render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
+def render_path(vertices, faces, opacity, texture, i_iter,  render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
 
     H, W, focal = hwf
 
@@ -208,7 +206,7 @@ def render_path(vertices, faces, opacity, rgb_color, i_iter,  render_poses, hwf,
 
     t = time.time()
     for i, c2w in enumerate(tqdm(render_poses)):
-        rgb, disp, acc, _ = render(vertices, faces,  opacity, rgb_color, i_iter,  H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
+        rgb, disp, acc, _ = render(vertices, faces,  opacity, texture, i_iter,  H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
         rgbs.append(rgb.numpy())
         disps.append(disp.numpy())
         accs.append(acc.numpy())
@@ -230,13 +228,11 @@ def render_path(vertices, faces, opacity, rgb_color, i_iter,  render_poses, hwf,
 
 def create_MeshGS(args):
 
-    model = MeshGS(mesh_icosphere = args.icosphere, mesh_from_file=args.mesh_from_file, mesh_path=args.mesh_path).to(device)
-
+    model = MeshGS(mesh_from_file=args.mesh_from_file, mesh_path=args.mesh_path).to(device)
     grad_vars = list(model.parameters())
 
     # Create optimizer
     optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
-
     start = 0
     
     ##########################
@@ -289,15 +285,6 @@ def calculate_uv(mesh_vertices, mesh_faces):
 
         return torch.stack(uv_coords)
 
-# def check_barycentric_coordinates(u, v, w):
-#     if u >= 0 and v >= 0 and w >= 0:
-#         if abs(u + v + w - 1.0) < 1e-6:
-#             return True 
-#         else:
-#             raise ValueError("Sum of barycentric coordinates u + v + w must equal 1")
-#     else:
-#         raise ValueError("Barycentric coordinates u, v, w must be non-negative")
-
 
 def calculate_barycentric_coordinates(point, vertices_A, vertices_B, vertices_C):
     # https://ceng2.ktu.edu.tr/~cakir/files/grafikler/Texture_Mapping.pdf
@@ -314,28 +301,20 @@ def calculate_barycentric_coordinates(point, vertices_A, vertices_B, vertices_C)
         v = (d11 * d20 - d01 * d21) / denom
         w = (d00 * d21 - d01 * d20) / denom
         u = 1.0 - v - w
-        # check_barycentric_coordinates(u, v, w)
         return u, v, w
 
 
-
-def find_uv_coordinates(points, faces_indices, faces, vertices):
-    uv_coords = []
-    for point, face_idx in zip(points, faces_indices):
-        face = faces[face_idx]
-        face = face.long()
-        A = vertices[face[0]]
-        B = vertices[face[1]]
-        C = vertices[face[2]]
-        u, v, w = calculate_barycentric_coordinates(torch.tensor(point), A, B, C)
-        uv_coords.append(torch.tensor([u, v]))
-    return torch.stack(uv_coords)
+def find_uv_coordinates(point, face_idx, faces, vertices):
+    face = faces[face_idx]
+    face = face.long()
+    A = vertices[face[0]]
+    B = vertices[face[1]]
+    C = vertices[face[2]]
+    u, v, w = calculate_barycentric_coordinates(torch.tensor(point), A, B, C)
+    return torch.tensor([u, v])
 
 
-
-
-
-def raw2outputs(N_rays, opacity_tabs, rgb_tabs, uv_coords, opacity_noise_std=0, white_bkgd=False, pytest=False):
+def raw2outputs(N_rays, opacity_tabs, rgb_tabs, opacity_noise_std=0, white_bkgd=False, pytest=False):
     """Transforms model's predictions to semantically meaningful values.
     Returns:
         rgb_map: [num_rays, 3]. Estimated RGB color of a ray.
@@ -349,18 +328,9 @@ def raw2outputs(N_rays, opacity_tabs, rgb_tabs, uv_coords, opacity_noise_std=0, 
     if rgb_tabs != [] and opacity_tabs != []:
    
         rgb = torch.sigmoid(rgb_tabs)  # [N_rays, N_samples, 3]
-        uv_coords = uv_coords.unsqueeze(0).float()
-        image = rgb.unsqueeze(0).permute(0, 3, 1, 2).float()
-        # print(uv_coords.shape, image.shape, image.permute(0, 3, 1, 2).shape)
-        sampled_color = F.grid_sample(image, uv_coords, align_corners=True)  
-        # print(sampled_color, sampled_color.permute(2, 3, 1, 0).squeeze().shape)
-        rgb = sampled_color.permute(2, 3, 1, 0).squeeze()
-
-
         noise = 0.
         if opacity_noise_std > 0.:
             noise = noise = torch.randn(opacity_tabs.shape) * opacity_noise_std
-    
         alpha = raw2alpha(opacity_tabs + noise) # [N_rays, N_samples]
     
     else:
@@ -373,9 +343,6 @@ def raw2outputs(N_rays, opacity_tabs, rgb_tabs, uv_coords, opacity_noise_std=0, 
 
     sum_weights = torch.sum(weights, dim=1)
     sum_weights_equal_to_one = torch.allclose(sum_weights, torch.ones_like(sum_weights), atol=1e-6)
-
-    if sum_weights_equal_to_one == True:
-        print(" Sum weights equal to one")
 
     depth_map = torch.sum(weights, -1) 
     disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
@@ -390,11 +357,11 @@ def raw2outputs(N_rays, opacity_tabs, rgb_tabs, uv_coords, opacity_noise_std=0, 
 
 def sort_faces_along_the_ray_by_distance(points, index_ray, index_tri, rays_o):
     intersections_by_ray = defaultdict(list)
-    # calculate distance
+
     for point, ray_idx, tri_idx in zip(points, index_ray, index_tri):
         distance = torch.linalg.norm(torch.tensor(point) - rays_o[ray_idx])
         intersections_by_ray[ray_idx].append((distance, tri_idx, point))   
-    #sort by distance
+
     for ray_idx in intersections_by_ray:
         intersections_by_ray[ray_idx].sort(key=lambda x: x[0])
 
@@ -428,7 +395,7 @@ def map_ray_to_intersections(intersections_by_ray, N_rays):
 def render_rays(vertices, 
                 faces,
                 opacity, 
-                rgb_color,
+                texture,
                 i_iter,
                 ray_batch,
                 white_bkgd=False,
@@ -455,13 +422,13 @@ def render_rays(vertices,
       disp0: See disp_map. Output for coarse model.
       acc0: See acc_map. Output for coarse model.
     """
-    # pts [N_rays, N_samples, 3]
 
-    opacity_tabs, rgb_tabs, uv_coords = [], [], []
+    opacity_tabs, uv_coords = [], []
     N_rays = ray_batch.shape[0]
     rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each
    
     # Ray tracking
+    # vertices_np = vertices.detach().numpy()
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
     points, index_ray, index_tri = mesh.ray.intersects_location(ray_origins=rays_o, ray_directions=rays_d)
     assert isinstance(mesh.ray, trimesh.ray.ray_pyembree.RayMeshIntersector), "The mesh doesn't use pyembree."
@@ -474,43 +441,41 @@ def render_rays(vertices,
     intersects_faces_dict, intersects_points_dict = map_ray_to_intersections(intersections_by_ray, N_rays)
 
     # Assigning color and transparency to the intersected face
-    
-    # Case 1: Rays don't intersect the mesh anywhere
+    unique_values, counts = np.unique(index_ray, return_counts=True)
     if len(points) == 0:
-        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(N_rays, opacity_tabs, rgb_tabs, opacity_noise_std, white_bkgd, pytest=pytest)
-    
-    # Case 2: Some rays intersected the mesh
-    else:
-        unique_values, counts = np.unique(index_ray, return_counts=True)
-        max_valid_points = max(counts)
+         rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(N_rays, opacity_tabs, [], opacity_noise_std, white_bkgd, pytest=pytest)
+        
+    else: # Rays don't intersect the mesh anywhere
+        max_valid_points = max(counts) # POTEM DAJ TU MAKS
+
+        hit_tris = torch.full((N_rays, max_valid_points), torch.tensor(132000))
+        opacity_tabs = torch.full((N_rays,  max_valid_points), torch.tensor(float('-inf')))
+        uv_coords = torch.zeros((N_rays, max_valid_points, 2))
 
         for index_ray, faces_indices in intersects_faces_dict.items():
-            if faces_indices == None:
-                opacity_tabs.extend([torch.tensor(1)] * max_valid_points) 
-                rgb_tabs.extend([torch.ones(3)]  * max_valid_points)
-                uv_coords.extend([torch.zeros(2)] * max_valid_points)
-            else:
-                sum_valid_points_per_ray = len(faces_indices)
-                diff = max_valid_points - sum_valid_points_per_ray
-                opacity_tabs.extend(opacity[faces_indices])
-                rgb_tabs.extend(rgb_color[faces_indices])
-                points = intersects_points_dict[index_ray]
-                uv = find_uv_coordinates(points, faces_indices, faces, vertices)
-                assert rgb_color[faces_indices].shape[0] == uv.shape[0]
-                uv_coords.extend(uv)
-                if diff > 0:
-                    opacity_tabs.extend([torch.tensor(1)] * diff)
-                    rgb_tabs.extend([torch.ones(3)] * diff)
-                    uv_coords.extend([torch.zeros(2)] * diff)  
+            if faces_indices is None or len(faces_indices) == 0:
+                continue
+            
+            points = intersects_points_dict[index_ray]
+            sum_valid_points_per_ray = len(faces_indices)
+            # hit_tris[index_ray, :max_valid_points] = torch.tensor(faces_indices[:max_valid_points])
+            for j in range(min(sum_valid_points_per_ray, max_valid_points)):
+                face_idx = faces_indices[j]
+                point = points[j]
+                opacity_tabs[index_ray, j] = opacity[face_idx]
+                uv_coords[index_ray, j] =  find_uv_coordinates(point, face_idx, faces, vertices)
+            hit_tris[index_ray, :j] = torch.tensor(faces_indices[:j])
+
+
+        texture_tabs = texture[hit_tris.view(-1)]
+        uv_coords = uv_coords.view((-1, 1, 1, 2))
         
-        opacity_tabs = torch.stack(opacity_tabs).reshape(N_rays, max_valid_points) # [N_rays, N_samples]
-        rgb_tabs = torch.stack(rgb_tabs).reshape(N_rays, -1, 3)       # [N_rays, N_samples, 3]
-        uv_coords = torch.stack(uv_coords).reshape(N_rays, -1, 2)  #[N_rays, N_samples, 2]
-        
-        # rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(N_rays,opacity_tabs, rgb_tabs, opacity_noise_std, white_bkgd, pytest=pytest)
- 
-    
-    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(N_rays, opacity_tabs, rgb_tabs, uv_coords, opacity_noise_std, white_bkgd, pytest=pytest)
+
+        texture_tabs = texture_tabs.permute((0, 3, 1, 2))
+        # print(torch.nn.functional.grid_sample(texture , uv_coords,).squeeze().shape)
+        # print(torch.nn.functional.grid_sample(texture , uv_coords,)[:, 0, 0].shape)
+        rgb_raw = torch.nn.functional.grid_sample(texture_tabs , uv_coords,).squeeze().view((N_rays, max_valid_points, 3))
+        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(N_rays, opacity_tabs, rgb_raw, opacity_noise_std, white_bkgd, pytest=pytest)
 
     ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map}
     for k in ret:
@@ -521,13 +486,13 @@ def render_rays(vertices,
 
 
 
-def save_mesh_as_file(vertices, faces, rgb_color, opacity, meshbase):
-    rgb_color = torch.sigmoid(rgb_color).detach().numpy()
-    opacity = torch.sigmoid(opacity).detach().numpy()
-    rgb_color = (rgb_color * 255).astype(np.uint8)
-    colors_with_opacity = np.concatenate((rgb_color, opacity.reshape(-1, 1)), axis=1)
-    mesh = trimesh.Trimesh(vertices=vertices.detach().numpy(), faces=faces.detach().numpy(), face_colors=colors_with_opacity[:-1])
-    mesh.export(meshbase + '.ply')
+# def save_mesh_as_file(vertices, faces, rgb_color, opacity, meshbase):
+#     rgb_color = torch.sigmoid(rgb_color).detach().numpy()
+#     opacity = torch.sigmoid(opacity).detach().numpy()
+#     rgb_color = (rgb_color * 255).astype(np.uint8)
+#     colors_with_opacity = np.concatenate((rgb_color, opacity.reshape(-1, 1)), axis=1)
+#     mesh = trimesh.Trimesh(vertices=vertices.detach().numpy(), faces=faces.detach().numpy(), face_colors=colors_with_opacity[:-1])
+#     mesh.export(meshbase + '.ply')
 
 
 
@@ -705,10 +670,10 @@ def train():
         vertices = model.get_vertices()
         faces = model.get_faces()
         opacity = model.get_opacity()
-        rgb_color = model.get_rgb_color()
+        texture = model.get_texture()
 
         
-        rgb, disp, acc, extras = render(vertices, faces, opacity, rgb_color, i,  H, W, K, chunk=args.chunk, rays=batch_rays,
+        rgb, disp, acc, extras = render(vertices, faces, opacity, texture, i,  H, W, K, chunk=args.chunk, rays=batch_rays,
                                                 verbose=i < 10,
                                                 **render_kwargs_train)
 
@@ -730,7 +695,7 @@ def train():
         optimizer.step()
 
         # for name, param in model.named_parameters():
-        #     if any(keyword in name for keyword in ['faces', 'vertices', 'rgb_color', 'opacity']):
+        #     if any(keyword in name for keyword in ['faces', 'vertices', 'texture', 'opacity']):
         #         prev_value = prev_param_values.get(name)
         #         if prev_value is not None and torch.equal(prev_value, param):
         #             print(f'not change value: {name}')
@@ -756,8 +721,8 @@ def train():
                 vertices = model.get_vertices()
                 faces = model.get_faces()
                 opacity = model.get_opacity()
-                rgb_color = model.get_rgb_color()
-                rgbs, disps = render_path(vertices, faces,  opacity, rgb_color, i,  render_poses, hwf, K, args.chunk, render_kwargs_test)
+                texture = model.get_texture()
+                rgbs, disps = render_path(vertices, faces,  opacity, texture, i,  render_poses, hwf, K, args.chunk, render_kwargs_test)
 
 
             print('Done, saving', rgbs.shape, disps.shape)
@@ -765,8 +730,8 @@ def train():
             meshbase = os.path.join(basedir, expname, '{}_mesh_{:06d}'.format(expname, i))
             imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
             # imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
-            if args.save_mesh_ply == True:
-                save_mesh_as_file(vertices, faces, rgb_color, opacity, meshbase)
+            # if args.save_mesh_ply == True:
+                # save_mesh_as_file(vertices, faces, rgb_color, opacity, meshbase)
 
     
         if i%args.i_print==0:

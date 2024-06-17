@@ -1,6 +1,6 @@
-expname = cube_pink_uv
-basedir = ./results/test_uv
-datadir = ./cube/color_pink
+expname = hotdog_uv_coords_max
+basedir = ./results/change_assign_ray
+datadir = ./hotdog/
 dataset_type = blender
 opacity_noise_std=0
 
@@ -9,11 +9,10 @@ no_batching = True
 chunk=32768
 i_print=100
 i_video = 1000
-save_mesh_ply=True
+save_mesh_ply=False
 lrate=5e-4
-icosphere=False
 mesh_from_file=True
-mesh_path=./cube/cube.obj
+mesh_path=./hotdog/mesh_obj_color/hotdog.obj
 use_viewdirs=True
 
 white_bkgd = True
