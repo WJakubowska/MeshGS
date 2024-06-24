@@ -1,5 +1,5 @@
-expname = hotdog_uv_coords_max
-basedir = ./results/change_assign_ray
+expname = vertices_grad_True
+basedir = ./results/mesh_densify
 datadir = ./hotdog/
 dataset_type = blender
 opacity_noise_std=0
@@ -11,8 +11,8 @@ i_print=100
 i_video = 1000
 save_mesh_ply=False
 lrate=5e-4
-mesh_from_file=True
-mesh_path=./hotdog/mesh_obj_color/hotdog.obj
+n_subdivisions = 0
+mesh_path=./hotdog/mesh_obj_color/hotdog_surface_reconstruction.obj
 use_viewdirs=True
 
 white_bkgd = True
