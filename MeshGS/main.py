@@ -81,10 +81,10 @@ def config_parser():
                         help='frequency of render_poses video saving')
     
     # mesh options
-    parser.add_argument("--mesh_from_file", action='store_true',
-                        help='if true, mesh is load from file')
     parser.add_argument("--mesh_path", type=str,
                         help='specific mesh .ply or .obj file')
+    parser.add_argument("--n_subdivisions",  type=int, default=0,
+                        help='number of mesh subdivisions performed in the mesh densification process')
     
     parser.add_argument("--save_mesh_ply", action='store_true', 
                         help='if true, the mesh is save as ply after render')
@@ -228,7 +228,7 @@ def render_path(vertices, faces, opacity, texture, i_iter,  render_poses, hwf, K
 
 def create_MeshGS(args):
 
-    model = MeshGS(mesh_from_file=args.mesh_from_file, mesh_path=args.mesh_path).to(device)
+    model = MeshGS(mesh_path=args.mesh_path, n_subdivisions=args.n_subdivisions).to(device)
     grad_vars = list(model.parameters())
 
     # Create optimizer
@@ -286,32 +286,38 @@ def calculate_uv(mesh_vertices, mesh_faces):
         return torch.stack(uv_coords)
 
 
-def calculate_barycentric_coordinates(point, vertices_A, vertices_B, vertices_C):
+def calculate_barycentric_coordinates(points, vertices_A, vertices_B, vertices_C):
     # https://ceng2.ktu.edu.tr/~cakir/files/grafikler/Texture_Mapping.pdf
-        v0 = vertices_B - vertices_A
-        v1 = vertices_C - vertices_A
-        v2 = point - vertices_A
-        
-        d00 = torch.dot(v0, v0)
-        d01 = torch.dot(v0, v1)
-        d11 = torch.dot(v1, v1)
-        d20 = torch.dot(v2, v0)
-        d21 = torch.dot(v2, v1)
-        denom = d00 * d11 - d01 * d01
-        v = (d11 * d20 - d01 * d21) / denom
-        w = (d00 * d21 - d01 * d20) / denom
-        u = 1.0 - v - w
-        return u, v, w
+    v0 = vertices_B - vertices_A
+    v1 = vertices_C - vertices_A
+    v2 = points - vertices_A
+
+    d00 = torch.sum(v0 * v0, dim=1)
+    d01 = torch.sum(v0 * v1, dim=1)
+    d11 = torch.sum(v1 * v1, dim=1)
+    d20 = torch.sum(v2 * v0, dim=1)
+    d21 = torch.sum(v2 * v1, dim=1)
+    
+    denom = d00 * d11 - d01 * d01
+    v = (d11 * d20 - d01 * d21) / denom
+    w = (d00 * d21 - d01 * d20) / denom
+    u = 1.0 - v - w
+    
+    return u, v, w
 
 
-def find_uv_coordinates(point, face_idx, faces, vertices):
-    face = faces[face_idx]
-    face = face.long()
-    A = vertices[face[0]]
-    B = vertices[face[1]]
-    C = vertices[face[2]]
-    u, v, w = calculate_barycentric_coordinates(torch.tensor(point), A, B, C)
-    return torch.tensor([u, v])
+def find_uv_coordinates(points, face_indices, faces, vertices):
+    # print("W find uv: ", vertices.requires_grad)
+    faces = faces[face_indices].long()
+    A = vertices[faces[:, 0]]
+    B = vertices[faces[:, 1]]
+    C = vertices[faces[:, 2]]
+    
+    points = torch.tensor(points)
+    
+    u, v, w = calculate_barycentric_coordinates(points, A, B, C)
+    # print("W find uv po calculare: ", vertices.requires_grad)
+    return torch.stack([u, v], dim=1)
 
 
 def raw2outputs(N_rays, opacity_tabs, rgb_tabs, opacity_noise_std=0, white_bkgd=False, pytest=False):
@@ -341,16 +347,17 @@ def raw2outputs(N_rays, opacity_tabs, rgb_tabs, opacity_noise_std=0, white_bkgd=
     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
     rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
 
-    sum_weights = torch.sum(weights, dim=1)
-    sum_weights_equal_to_one = torch.allclose(sum_weights, torch.ones_like(sum_weights), atol=1e-6)
-
     depth_map = torch.sum(weights, -1) 
     disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
     acc_map = torch.sum(weights, -1)
+    
+    assert acc_map.max() <= 1. and acc_map.min() >= 0.
 
     if white_bkgd:
         rgb_map = rgb_map + (1.-acc_map[...,None])
 
+    assert rgb_map.max() <= 1. and rgb_map.min() >= 0.
+    
     return rgb_map, disp_map, acc_map, weights, depth_map
 
 
@@ -426,13 +433,13 @@ def render_rays(vertices,
     opacity_tabs, uv_coords = [], []
     N_rays = ray_batch.shape[0]
     rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each
-   
+    
     # Ray tracking
     # vertices_np = vertices.detach().numpy()
-    mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+    mesh = trimesh.Trimesh(vertices=vertices.detach().numpy(), faces=faces)
     points, index_ray, index_tri = mesh.ray.intersects_location(ray_origins=rays_o, ray_directions=rays_d)
-    assert isinstance(mesh.ray, trimesh.ray.ray_pyembree.RayMeshIntersector), "The mesh doesn't use pyembree."
-
+    assert isinstance(mesh.ray, trimesh.ray.ray_pyembree.RayMeshIntersector), "The trimesh doesn't use pyembree."
+    
     # Sort faces along the ray by distance
     intersections_by_ray = sort_faces_along_the_ray_by_distance(points, index_ray, index_tri, rays_o)
 
@@ -446,9 +453,9 @@ def render_rays(vertices,
          rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(N_rays, opacity_tabs, [], opacity_noise_std, white_bkgd, pytest=pytest)
         
     else: # Rays don't intersect the mesh anywhere
-        max_valid_points = max(counts) # POTEM DAJ TU MAKS
+        max_valid_points = max(counts) 
 
-        hit_tris = torch.full((N_rays, max_valid_points), torch.tensor(132000))
+        hit_tris = torch.full((N_rays, max_valid_points), torch.tensor(0))
         opacity_tabs = torch.full((N_rays,  max_valid_points), torch.tensor(float('-inf')))
         uv_coords = torch.zeros((N_rays, max_valid_points, 2))
 
@@ -458,24 +465,22 @@ def render_rays(vertices,
             
             points = intersects_points_dict[index_ray]
             sum_valid_points_per_ray = len(faces_indices)
-            # hit_tris[index_ray, :max_valid_points] = torch.tensor(faces_indices[:max_valid_points])
-            for j in range(min(sum_valid_points_per_ray, max_valid_points)):
-                face_idx = faces_indices[j]
-                point = points[j]
-                opacity_tabs[index_ray, j] = opacity[face_idx]
-                uv_coords[index_ray, j] =  find_uv_coordinates(point, face_idx, faces, vertices)
-            hit_tris[index_ray, :j] = torch.tensor(faces_indices[:j])
 
+            num_points = min(sum_valid_points_per_ray, max_valid_points)
 
+            hit_tris[index_ray, :num_points] = torch.tensor(faces_indices[:num_points])
+            uv = find_uv_coordinates(points[:num_points], faces_indices[:num_points], faces, vertices)
+            uv_coords[index_ray, :num_points] = uv
+            opacity_tabs[index_ray, :num_points] = opacity[faces_indices]            
+        
         texture_tabs = texture[hit_tris.view(-1)]
         uv_coords = uv_coords.view((-1, 1, 1, 2))
         
 
         texture_tabs = texture_tabs.permute((0, 3, 1, 2))
-        # print(torch.nn.functional.grid_sample(texture , uv_coords,).squeeze().shape)
-        # print(torch.nn.functional.grid_sample(texture , uv_coords,)[:, 0, 0].shape)
-        rgb_raw = torch.nn.functional.grid_sample(texture_tabs , uv_coords,).squeeze().view((N_rays, max_valid_points, 3))
+        rgb_raw = torch.nn.functional.grid_sample(texture_tabs , uv_coords, align_corners=False).squeeze().view((N_rays, max_valid_points, 3))
         rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(N_rays, opacity_tabs, rgb_raw, opacity_noise_std, white_bkgd, pytest=pytest)
+        
 
     ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map}
     for k in ret:
@@ -694,14 +699,14 @@ def train():
         loss.backward()
         optimizer.step()
 
-        # for name, param in model.named_parameters():
-        #     if any(keyword in name for keyword in ['faces', 'vertices', 'texture', 'opacity']):
-        #         prev_value = prev_param_values.get(name)
-        #         if prev_value is not None and torch.equal(prev_value, param):
-        #             print(f'not change value: {name}')
-        #         else:
-        #             print(f'change value: {name}')
-        #         prev_param_values[name] = param.clone().detach()
+        for name, param in model.named_parameters():
+            if any(keyword in name for keyword in ['vertices', 'texture', 'opacity']):
+                prev_value = prev_param_values.get(name)
+                if prev_value is not None and torch.equal(prev_value, param):
+                    print(f'not change value: {name}')
+                else:
+                    print(f'change value: {name}')
+                prev_param_values[name] = param.clone().detach()
 
         # NOTE: IMPORTANT!
         ###   update learning rate   ###

@@ -18,7 +18,7 @@ img2BCE = lambda input, target: F.binary_cross_entropy(input, target)
 
 # Model
 class MeshGS(torch.nn.Module):
-    def __init__(self, mesh_from_file = False, mesh_path = None):
+    def __init__(self,  mesh_path = None, n_subdivisions=0):
         super(MeshGS, self).__init__()
 
         self.opacity = None
@@ -30,19 +30,21 @@ class MeshGS(torch.nn.Module):
         self.test_mesh = False
 
 
-        if mesh_from_file == True:
-            if mesh_path is not None:
-                mesh = trimesh.load(mesh_path, force='mesh') 
-                vertices = []
-                for vertex in mesh.vertices:
-                    vertex = Vertex(vertex[0], vertex[1], vertex[2])
-                    vertices.append(vertex)
+        if mesh_path is not None:
+            mesh = trimesh.load(mesh_path, force='mesh')
+            if n_subdivisions != 0:
+                mesh =  self.densify_mesh(mesh, n_subdivisions)
 
-                self.mesh_vertices = vertices
-                self.mesh_faces = mesh.faces
+            vertices = []
+            for vertex in mesh.vertices:
+                vertex = Vertex(vertex[0], vertex[1], vertex[2])
+                vertices.append(vertex)
+
+            self.mesh_vertices = vertices
+            self.mesh_faces = mesh.faces
               
-            else:
-                raise ValueError("Path to mesh file is not provided")
+        else:
+            raise ValueError("Path to mesh file is not provided")
             
         self.setup_training_input(self.mesh_vertices, self.mesh_faces)
 
@@ -73,6 +75,12 @@ class MeshGS(torch.nn.Module):
 
     def inverse_sigmoid(self, x):
         return torch.log(x/(1-x))
+    
+    def densify_mesh(self, mesh, subdivisions=1):
+        for _ in range(subdivisions):
+            mesh = mesh.subdivide()
+        return mesh
+
 
     def setup_training_input(self, mesh_vertices, mesh_faces):
         
@@ -82,12 +90,15 @@ class MeshGS(torch.nn.Module):
 
         
         self.faces = torch.nn.Parameter(r_triangles, requires_grad=False)
-        self.vertices = torch.nn.Parameter(vertices_tensor, requires_grad=False)       
+        self.vertices = torch.nn.Parameter(vertices_tensor, requires_grad=True)       
         
      
-        self.opacity = torch.nn.Parameter(self.inverse_sigmoid(0.1 * torch.ones(r_triangles.shape[0]+1)), requires_grad=True)
+        self.opacity = torch.nn.Parameter(self.inverse_sigmoid(0.1 * torch.ones(r_triangles.shape[0])), requires_grad=True)
+        # self.opacity = torch.nn.Parameter(torch.full((r_triangles.shape[0],), float('inf')), requires_grad=False)
+
+
         # self.rgb_color = torch.nn.Parameter(torch.abs(torch.normal(0, 0.1, size=(r_triangles.shape[0]+1, 3))), requires_grad=True)
-        self.texture = torch.nn.Parameter(torch.randn(r_triangles.shape[0] + 1, 8, 8, 3) * 0.01 , requires_grad= True)
+        self.texture = torch.nn.Parameter(torch.randn(r_triangles.shape[0], 8, 8, 3) * 0.01 , requires_grad= True)
 
         print("Mesh path: ", self.mesh_path)
         print("Vertices shape: ", self.vertices.shape)
