@@ -13,7 +13,7 @@ def save_plot_as_html(name, fig):
         f'{dir}/{name}', auto_open=True
     )
 
-def plot_sphere(vertices, triangles, show_vertices = False):
+def plot_sphere(vertices, triangles, show_vertices = False, name='mesh.html'):
     fig = go.Figure()
 
     for triangle in triangles:
@@ -26,7 +26,7 @@ def plot_sphere(vertices, triangles, show_vertices = False):
           fig.add_trace(go.Scatter3d(x=x, y=y, z=z, mode='markers', marker=dict(size=5, color='red'), showlegend=False))
 
     fig.update_layout(scene=dict(aspectmode="data"))
-    save_plot_as_html('mesh.html', fig)
+    save_plot_as_html(name, fig)
 
 
 def plot_filled_triangle_sphere(vertices, triangles, fill_triangle_index=None, show_vertices=False):
@@ -50,7 +50,7 @@ def plot_filled_triangle_sphere(vertices, triangles, fill_triangle_index=None, s
     save_plot_as_html('mesh_with_filled_face.html', fig)
 
 
-def plot_sphere_from_tensor_with_index(vertices, triangles, show_vertices=False):
+def plot_sphere_from_tensor_with_index(vertices, triangles, show_vertices=False, name='mesh.html'):
     fig = go.Figure()
 
     for triangle in triangles:
@@ -64,7 +64,7 @@ def plot_sphere_from_tensor_with_index(vertices, triangles, show_vertices=False)
             fig.add_trace(go.Scatter3d(x=x, y=y, z=z, mode='markers', marker=dict(size=5, color='red')))
 
     fig.update_layout(scene=dict(aspectmode="data"))
-    save_plot_as_html('mesh_from_tensor_with_index.html', fig)
+    save_plot_as_html(name, fig)
 
 
 def plot_rays_mesh_and_points(
@@ -77,7 +77,6 @@ def plot_rays_mesh_and_points(
 ):
     vertices = vertices.detach().cpu().numpy()
 
-    # Create a layout for the 3D scene
     layout = go.Layout(
         scene=dict(
             xaxis=dict(title='X'),
@@ -90,7 +89,7 @@ def plot_rays_mesh_and_points(
     lines = []
     for i in range(len(rays_origins)):
         ray_origin, ray_direction = rays_origins[i], rays_directions[i]
-        ray_end = ray_origin + ray_length_scale * ray_direction  # Dostosowanie długości promienia
+        ray_end = ray_origin + ray_length_scale * ray_direction 
         lines.append(go.Scatter3d(
             x=[ray_origin[0], ray_end[0]],
             y=[ray_origin[1], ray_end[1]],
@@ -116,7 +115,6 @@ def plot_rays_mesh_and_points(
             )
         )
 
-    # data = data + triangles + pts_on_mesh_sc
     data = data + triangles
     fig = go.Figure(
         data=data,
@@ -130,8 +128,6 @@ def plot_selected_points_on_sphere(selected_pts, vertices, triangles, name='sele
 
     vertices = vertices.cpu().detach().numpy()
     triangles = triangles.cpu().detach().numpy().astype(int)
-    # print("vertices:", vertices)
-    # print("triangles:", triangles)
     for triangle in triangles:
         triangle_vertices = vertices[triangle]
         x, y, z = zip(*triangle_vertices)

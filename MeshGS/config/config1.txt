@@ -1,21 +1,23 @@
-expname = vertices_grad_True
-basedir = ./results/mesh_densify
-datadir = ./hotdog/
+expname = 512_texture_16_one_optim
+basedir = ./results/sample_points_l1_l2_bce
+datadir = ./data/dataset/hotdog
 dataset_type = blender
 opacity_noise_std=0
 
-half_res = True
-no_batching = True
-chunk=32768
+
 i_print=100
-i_video = 1000
-save_mesh_ply=False
-lrate=5e-4
+i_video = 50000
+train_vertices = True
+texture_size = 16
+lrate=1e-2
 n_subdivisions = 0
-mesh_path=./hotdog/mesh_obj_color/hotdog_surface_reconstruction.obj
-use_viewdirs=True
+mesh_path=./data/mesh/sample/mesh_512.obj
+mesh_target_path=./data/mesh/hotdog.obj
+render_factor = 8
 
 white_bkgd = True
-
 N_rand = 1024
+half_res = True
+no_batching = True
+use_viewdirs=True
 
