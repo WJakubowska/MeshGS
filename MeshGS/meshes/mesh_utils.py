@@ -1,4 +1,4 @@
-from utils.triangle import Triangle
+from meshes.mesh_structures import Triangle
 
 
 def make_permutations(triangle):

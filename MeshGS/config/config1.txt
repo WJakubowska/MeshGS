@@ -1,22 +1,28 @@
-expname = 512_texture_16_one_optim
-basedir = ./results/sample_points_l1_l2_bce
+expname = add_points_clouds
+basedir = ./results/point_clouds
 datadir = ./data/dataset/hotdog
 dataset_type = blender
 opacity_noise_std=0
 
-
+lrate_offsets=1e-3
 i_print=100
-i_video = 50000
+i_video = 1000
 train_vertices = True
-texture_size = 16
+texture_size = 8
 lrate=1e-2
 n_subdivisions = 0
-mesh_path=./data/mesh/sample/mesh_512.obj
+mesh_path=./data/mesh/sample/mesh_10_000.obj
 mesh_target_path=./data/mesh/hotdog.obj
 render_factor = 8
+opacity_noise_std=1e0
 
 white_bkgd = True
 N_rand = 1024
+
+
+
+
+
 half_res = True
 no_batching = True
 use_viewdirs=True

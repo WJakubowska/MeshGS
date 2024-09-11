@@ -1,6 +1,64 @@
 import numpy as np
-from utils.vertex import Vertex
-from utils.triangle import Triangle
+import torch
+import math
+
+class Vertex:
+    def __init__(self, x, y, z, index=None):
+        self.x = x
+        self.y = y
+        self.z = z
+        self.index = index
+
+    def __str__(self):
+        return f"({self.x}, {self.y}, {self.z})"
+
+    def to_dict(self):
+        return {"x": self.x, "y": self.y, "z": self.z}
+
+    def __lt__(self, other):
+        return (self.x, self.y, self.z) < (other.x, other.y, other.z)
+
+    def __eq__(self, other):
+        return isinstance(other, Vertex) and (self.x, self.y, self.z) == (
+            other.x,
+            other.y,
+            other.z,
+        )
+
+    def __sub__(self, other):
+        return
+
+    def __hash__(self):
+        return hash((self.x, self.y, self.z))
+    
+
+class Triangle:
+    def __init__(self, v0, v1, v2):
+        self.v0 = v0
+        self.v1 = v1
+        self.v2 = v2
+        self.vertices = [self.v0, self.v1, self.v2]
+
+    def __str__(self):
+        return f"v0={self.v0}, v1={self.v1}, v2={self.v2}"
+
+    def to_dict(self):
+        return {'v0': self.v0.to_dict(), 'v1': self.v1.to_dict(), 'v2': self.v2.to_dict()}
+
+    def __eq__(self, other):
+        if isinstance(other, Triangle):
+            return (self.v0 == other.v0 and self.v1 == other.v1 and self.v2 == other.v2) or \
+                   (self.v0 == other.v1 and self.v1 == other.v2 and self.v2 == other.v0) or \
+                   (self.v0 == other.v2 and self.v1 == other.v0 and self.v2 == other.v1)
+
+    def get_vertices(self):
+        return [self.v0, self.v1, self.v2]
+
+    def get_vertices_tensor(self):
+        return [torch.tensor([self.v0.x, self.v0.y, self.v0.z], dtype=torch.float32),
+                torch.tensor([self.v1.x, self.v1.y, self.v1.z], dtype=torch.float32),
+                torch.tensor([self.v2.x, self.v2.y, self.v2.z], dtype=torch.float32)]
+
 
 class Icosphere:
     def __init__(self, n_subdivisions, center_point=(0, 0, 0), radius=[1]):
@@ -116,5 +174,45 @@ class Icosphere:
         for triangle in self.triangles:
             all_vertices_set.update(triangle.get_vertices())
         return list(all_vertices_set)
+    
 
+class UVSphere:
+    def __init__(self, n_slices=10, n_stacks=10):
+        self.vertices, self.triangles = self._create_sphere(n_slices, n_stacks)
 
+    
+    def __uv_sphere(self, n_slices, n_stacks):
+        vertices = []
+        vertices.append(Vertex(0, 1, 0))
+        for i in range(n_stacks - 1):
+            phi = math.pi * (i + 1) / n_stacks
+            for j in range(n_slices):
+                theta = 2.0 * math.pi * j / n_slices
+                x = math.sin(phi) * math.cos(theta)
+                y = math.cos(phi)
+                z = math.sin(phi) * math.sin(theta)
+                vertices.append(Vertex(x, y, z))
+        vertices.append(Vertex(0, -1, 0))
+
+        triangles = []
+
+        for i in range(n_slices):
+            i0 = i + 1
+            i1 = (i + 1) % n_slices + 1
+            triangles.append(Triangle(vertices[0], vertices[i1], vertices[i0]))
+            i0 = i + n_slices * (n_stacks - 2) + 1
+            i1 = (i + 1) % n_slices + n_slices * (n_stacks - 2) + 1
+            triangles.append(Triangle(vertices[-1], vertices[i0], vertices[i1]))
+
+        for j in range(n_stacks - 2):
+            j0 = j * n_slices + 1
+            j1 = (j + 1) * n_slices + 1
+            for i in range(n_slices):
+                i0 = j0 + i
+                i1 = j0 + (i + 1) % n_slices
+                i2 = j1 + (i + 1) % n_slices
+                i3 = j1 + i
+                triangles.append(Triangle(vertices[i0], vertices[i1], vertices[i2]))
+                triangles.append(Triangle(vertices[i0], vertices[i2], vertices[i3]))
+
+        return vertices, triangles
