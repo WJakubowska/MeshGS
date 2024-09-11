@@ -161,11 +161,11 @@ cython_debug/
 
 # Dataset
 data/
-hotdog/
-cube/ 
 
 #Logs
 logs/
 results/
+compare_rgb/
+output_images/
 *.out
 *.sh
